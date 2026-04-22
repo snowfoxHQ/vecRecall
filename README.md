@@ -1,5 +1,7 @@
 # VecRecall
 
+![GitHub Release](https://img.shields.io/github/v/release/snowfoxHQ/vecRecall?label=Latest%20Release&color=007BFF)
+
 改进版 AI 长期记忆系统。基于对原版 MemPalace 的设计分析重新构建。
 
 ## 与原版的核心区别
