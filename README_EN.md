@@ -1,0 +1,287 @@
+**English** | [中文](README.md)
+
+# VecRecall
+
+An improved AI long-term memory system, rebuilt from scratch based on design analysis of the original MemPalace.
+
+## Key Differences from the Original
+
+| | Original MemPalace | VecRecall |
+|--|--|--|
+| Retrieval path | Vector + Room metadata filter | **Pure vector, no structural filter** |
+| L2 trigger | Room name matching | **Semantic similarity threshold (default 0.55)** |
+| AAAK summary | Participates in retrieval index | **UI layer only, not indexed** |
+| Wing/Topic | Affects both retrieval and display | **UI organization only, no retrieval impact** |
+| Recall rate (R@5) | ~84% (with all features enabled) | **96.6%+ (pure vector baseline)** |
+
+The core problem with the original: **the information organization layer and the retrieval path were tightly coupled**. Room filtering dropped recall from 96.6% to 89.4%, and AAAK participation in retrieval further dropped it to 84.2%. VecRecall separates these completely: retrieval uses vectors, organization uses the SQLite UI layer.
+
+---
+
+## Installation
+
+```bash
+# Basic (zero dependencies, hash embedding + in-memory vector)
+pip install -e .
+
+# Production (real semantic embedding + ChromaDB persistence)
+pip install -e ".[full]"
+```
+
+## Quick Start
+
+### Python API
+
+```python
+from vecrecall import VecRecall
+
+with VecRecall(base_dir="~/.vr", wing="my-project") as palace:
+    # Store a memory (verbatim, never rewritten)
+    palace.add(
+        content="Decided to use PostgreSQL instead of MySQL — better JSON support",
+        topic="database",
+        importance=0.9,
+        ui_summary="DB migration → PG",   # AAAK summary, UI display only, not indexed
+    )
+
+    # Semantic search (pure vector, no structural filter)
+    results = palace.search("database selection", n=5)
+
+    # Build four-layer context for direct AI prompt injection
+    ctx = palace.build_context(current_query="continuing the database discussion today")
+    print(ctx.l0_identity)            # L0: ~50 tokens
+    print(len(ctx.l1_key_moments))    # L1: top-15 key moments
+    print(len(ctx.l2_topic_context))  # L2: semantically triggered context
+```
+
+### CLI
+
+```bash
+# Initialize
+vr init --dir ~/.vr --wing my-project
+
+# Add a memory
+vr add "Fixed JWT expiry bug in auth module" --topic auth --importance 0.85
+echo "Today's meeting notes..." | vr add - --topic meeting
+
+# Semantic search
+vr search "authentication issues" --layer l3
+
+# Build four-layer context
+vr context "the auth solution we discussed before" --l3
+
+# System status
+vr stats
+vr wings
+vr topics --wing my-project
+
+# Agent diary (isolated per agent)
+vr diary write reviewer "Found SQL injection vulnerability #bug-456"
+vr diary write architect "Decided to adopt CQRS pattern"
+vr diary read reviewer "security vulnerability"
+
+# Archive a full session
+vr archive session.json
+
+# Export / Import
+vr export my-project --out backup.json
+vr import backup.json
+```
+
+### MCP Server (Claude Code / Gemini CLI)
+
+```bash
+# Start MCP stdio server
+vr mcp --dir ~/.vr --wing my-project
+
+# Or directly
+vr-mcp --dir ~/.vr --wing my-project
+```
+
+Configure in Claude Code's `mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "vecrecall": {
+      "command": "vr-mcp",
+      "args": ["--dir", "~/.vr", "--wing", "my-project"]
+    }
+  }
+}
+```
+
+---
+
+## Four-Layer Memory Stack
+
+Each AI wake-up loads only 600–900 tokens, instead of stuffing all history into the prompt.
+
+```
+L0  Identity layer       ~50 tokens    Loaded every time, fixed
+L1  Key moments          ~600 tokens   Top-15 by importance, no wing filter
+L2  Topic context        ~300 tokens   Loaded when similarity ≥ 0.55
+L3  Deep retrieval       On demand     Full semantic search, hits vector store directly
+```
+
+The L2 change is critical: the original used Room name matching to trigger loading. VecRecall uses a semantic similarity threshold instead.
+Threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `palace.L2_TRIGGER_THRESHOLD = 0.6`.
+
+---
+
+## MCP Tools (26 total)
+
+**Write**
+- `mp_add` — Store a single memory
+- `mp_add_batch` — Batch store
+- `mp_update_importance` — Update importance score
+
+**Retrieval (all use pure vector, no structural filter)**
+- `mp_search` — Semantic search
+- `mp_build_context` — Build four-layer context bundle
+- `mp_l1_moments` — Get L1 key moments
+- `mp_l2_context` — L2 semantically triggered context
+- `mp_l3_deep` — L3 full deep retrieval
+- `mp_fuzzy_recall` — Fuzzy recall (low threshold, loose match)
+
+**Organization layer (UI browsing only, no retrieval impact)**
+- `mp_list_wings` — List all wings
+- `mp_list_topics` — List topics
+- `mp_browse_wing` — Browse a wing
+- `mp_browse_topic` — Browse a topic
+- `mp_get_memory` — Get memory by ID
+
+**Knowledge graph**
+- `mp_link` — Create cross-wing association
+
+**Agent diary**
+- `mp_diary_write` — Write agent diary entry
+- `mp_diary_read` — Read agent diary
+
+**Session archive**
+- `mp_archive_session` — Archive full conversation
+
+**Management**
+- `mp_stats` — System statistics
+- `mp_health` — Health check
+- `mp_export_wing` — Export wing data
+- `mp_import_json` — Import JSON
+- `mp_set_identity` — Update L0 identity layer
+- `mp_set_wing` — Switch default wing
+- `mp_set_l2_threshold` — Adjust L2 threshold
+- `mp_format_prompt` — Format as injectable prompt
+
+---
+
+## Pluggable Backends
+
+```python
+from vecrecall.core.engine import (
+    VecRecall,
+    ChromaVectorBackend,         # requires: pip install chromadb
+    SentenceTransformerBackend,  # requires: pip install sentence-transformers
+)
+
+palace = VecRecall(
+    base_dir="~/.vr",
+    wing="prod",
+    vector_backend=ChromaVectorBackend("~/.vr/chroma"),
+    embedding_backend=SentenceTransformerBackend("all-MiniLM-L6-v2"),
+)
+```
+
+Default backend (zero dependencies): `NumpyVectorBackend` + `HashEmbeddingBackend` (hash vectors, no real semantics, for development/testing only).
+
+Recommended for production: `ChromaVectorBackend` + `SentenceTransformerBackend`.
+
+Auto-detection: if `sentence-transformers` and `chromadb` are installed, VecRecall automatically switches to the production backends on startup — no configuration needed.
+
+---
+
+## Privacy
+
+- Fully local, no data uploaded
+- Core features require no API key
+- SQLite stores metadata and raw text; vector store holds embeddings
+- Data directory defaults to `~/.vecrecall`, fully customizable
+
+---
+
+## Tests
+
+```bash
+python tests/test_core.py
+# Result: 46/46 passed
+```
+
+---
+
+## Windows Installation Notes
+
+Verified on Windows 11 (April 23, 2026).
+
+**Environment**
+- OS: Windows 11
+- Python: 3.10+
+- Install path: `I:\Github\VecRecall`
+- Data directory: `C:\Users\admin\.vecrecall`
+
+**Installation**
+
+```powershell
+cd I:\Github\VecRecall
+pip install -e .
+pip install sentence-transformers chromadb
+```
+
+**Verified output**
+
+```
+PS I:\Github\VecRecall> vr stats
+📊 VecRecall Status
+  Total memories: 1
+  Wings:          1
+  Cross-links:    0
+  Data directory: C:\Users\admin/.vecrecall
+  Default wing:   default
+  Vector backend: ChromaVectorBackend        ← auto-enabled after installing chromadb
+  Embedding backend: SentenceTransformerBackend  ← auto-enabled after installing sentence-transformers
+```
+
+**Notes**
+- Without production backends, VecRecall uses `HashEmbeddingBackend` (no real semantics)
+- After installing `sentence-transformers` and `chromadb`, backends switch automatically — no config needed
+- The model file (~90MB) is downloaded on first run, not at install time
+- The pip "new version available" notice is informational only and does not affect functionality
+- v1.0.2 fixes Chinese character encoding on Windows PowerShell — Chinese and English input both work correctly
+
+---
+
+## Changelog
+
+### v1.0.2 — April 23, 2026
+
+**Auto encoding detection for Chinese/English input (cli/main.py)**
+
+Fixed garbled Chinese text when using `vr add` on Windows PowerShell. PowerShell defaults to GBK encoding for command-line arguments, causing Chinese characters to be stored as garbage. v1.0.2 adds automatic encoding detection at the CLI entry point:
+
+- Detects stdin/stdout/stderr encoding at startup and reconfigures to UTF-8 if needed
+- Automatically fixes Chinese argument encoding in sys.argv on Windows
+- Chinese/English mixed content handled correctly
+- No impact on non-Windows environments
+
+### v1.0.1 — April 23, 2026
+
+**Auto backend detection (engine.py)**
+
+Fixed an issue where `sentence-transformers` and `chromadb`, once installed, were not being used — VecRecall continued using hash embeddings, making semantic search non-functional. Now detects installed backends at startup and switches automatically:
+
+- `sentence-transformers` detected → use `SentenceTransformerBackend`
+- `chromadb` detected → use `ChromaVectorBackend`
+- Neither installed → fall back to `HashEmbeddingBackend` + `NumpyVectorBackend`
+
+No configuration needed. Takes effect immediately after installing the dependencies.
+
+### v1.0.0 — April 20, 2026
+
+Initial release. Full reimplementation based on design analysis of MemPalace, with the retrieval path and organization layer fully decoupled.

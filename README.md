@@ -1,3 +1,5 @@
+[English](README_EN.md) | **中文**
+
 # VecRecall
 
 改进版 AI 长期记忆系统。基于对原版 MemPalace 的设计分析重新构建。
@@ -304,3 +306,32 @@ pip install sentence-transformers chromadb
 ```
 
 重新运行 `vr stats`，确认后端显示为 `SentenceTransformerBackend` 即升级成功。
+
+---
+
+## 更新说明 v1.0.2
+
+**更新日期：** 2026年4月23日
+
+### 本次更新内容
+
+**中英文编码自动适配（cli/main.py）**
+
+修复 Windows PowerShell 下中文参数乱码问题。之前在 Windows 环境下用 `vr add` 存入中文内容时，由于 PowerShell 默认使用 GBK 编码传递参数，导致存入的中文变成乱码。
+
+本次修改在 CLI 入口处增加自动编码检测和修正逻辑：
+
+- 启动时自动检测 stdin/stdout/stderr 编码，非 UTF-8 环境自动切换
+- Windows 下自动修正 sys.argv 中的中文参数编码
+- 中英文混合内容均可正确处理
+- 非 Windows 环境不受影响
+
+### 升级方式
+
+替换 `vecrecall/cli/main.py` 文件后重新执行：
+
+```powershell
+pip install -e .
+```
+
+升级后直接用 `vr add` 命令存入中文内容即可，无需额外处理。
