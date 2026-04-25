@@ -26,6 +26,33 @@ import sys
 import time
 from pathlib import Path
 
+# 自动适应中英文编码：强制 stdin/stdout/stderr 使用 UTF-8
+# 解决 Windows PowerShell 默认 GBK 编码导致中文乱码的问题
+if sys.stdout.encoding and sys.stdout.encoding.upper() not in ('UTF-8', 'UTF8'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.upper() not in ('UTF-8', 'UTF8'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+if sys.stdin.encoding and sys.stdin.encoding.upper() not in ('UTF-8', 'UTF8'):
+    sys.stdin.reconfigure(encoding='utf-8', errors='replace')
+
+# 修正命令行参数编码：Windows 下参数可能以 GBK 传入
+def _fix_encoding(s: str) -> str:
+    """尝试修正错误编码的字符串，自动识别中英文"""
+    if not isinstance(s, str):
+        return s
+    try:
+        # 尝试以 latin-1 解码后再用 GBK/UTF-8 重新编码，修正乱码
+        return s.encode('latin-1').decode('gbk')
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s  # 已经是正确的 UTF-8，直接返回
+
+# Windows 环境下自动修正 sys.argv 中的中文参数
+if sys.platform == 'win32':
+    fixed_argv = []
+    for arg in sys.argv:
+        fixed_argv.append(_fix_encoding(arg))
+    sys.argv = fixed_argv
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from vecrecall.core.engine import VecRecall
@@ -271,6 +298,69 @@ def cmd_mcp(args, cfg):
     print(f"[VecRecall MCP] 启动中  dir={d}  wing={w}", file=sys.stderr)
     server = MCPServer(base_dir=d, wing=w)
     server.run()
+def cmd_browse(args, cfg):
+    """按日期浏览记忆目录（格式：日期  |  话题+内容预览）"""
+    p = get_palace(cfg)
+    conn = p._kg._conn
+    wing_filter = args.wing or cfg.get("wing")
+
+    # 取所有日期（降序）
+    if wing_filter and not args.all:
+        rows = conn.execute(
+            "SELECT DISTINCT strftime('%Y-%m-%d', datetime(timestamp, 'unixepoch', 'localtime')) "
+            "as d FROM memories WHERE wing=? ORDER BY d DESC",
+            (wing_filter,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT strftime('%Y-%m-%d', datetime(timestamp, 'unixepoch', 'localtime')) "
+            "as d FROM memories ORDER BY d DESC"
+        ).fetchall()
+
+    if not rows:
+        print("  （暂无记忆）")
+        p.close()
+        return
+
+    wing_label = f"[{wing_filter}]" if (wing_filter and not args.all) else "[全部]"
+    print(f"📋 记忆目录  {wing_label}  共 {len(rows)} 天\n")
+
+    for (date,) in rows:
+        # 取当天所有记忆
+        if wing_filter and not args.all:
+            mems = conn.execute(
+                "SELECT topic, content FROM memories "
+                "WHERE wing=? AND strftime('%Y-%m-%d', datetime(timestamp, 'unixepoch', 'localtime'))=? "
+                "ORDER BY importance DESC",
+                (wing_filter, date)
+            ).fetchall()
+        else:
+            mems = conn.execute(
+                "SELECT topic, content FROM memories "
+                "WHERE strftime('%Y-%m-%d', datetime(timestamp, 'unixepoch', 'localtime'))=? "
+                "ORDER BY importance DESC",
+                (date,)
+            ).fetchall()
+
+        # 格式：日期  |  [话题] 内容预览  [话题] 内容预览...
+        entries = []
+        for topic, content in mems:
+            preview = content[:40].replace("\n", " ")
+            entries.append(f"[{topic}] {preview}")
+
+        # 每行最多显示 3 条，超出显示数量
+        shown = entries[:3]
+        rest = len(entries) - 3
+        line = "  ".join(shown)
+        if rest > 0:
+            line += f"  （+{rest} 条）"
+
+        print(f"  {date}  |  {line}")
+
+    print()
+    p.close()
+
+
 
 
 # ─────────────────────────────────────────────
@@ -345,6 +435,11 @@ def main():
     p_imp = sub.add_parser("import", help="从 JSON 导入")
     p_imp.add_argument("file")
 
+    # browse
+    p_browse = sub.add_parser("browse", help="按日期浏览记忆目录")
+    p_browse.add_argument("--wing", help="筛选某个 wing")
+    p_browse.add_argument("--all", action="store_true", help="显示所有 wing")
+
     # mcp
     p_mcp = sub.add_parser("mcp", help="启动 MCP 服务器")
     p_mcp.add_argument("--dir")
@@ -360,6 +455,7 @@ def main():
         "context": cmd_context, "stats": cmd_stats, "wings": cmd_wings,
         "topics": cmd_topics, "diary": cmd_diary, "archive": cmd_archive,
         "export": cmd_export, "import": cmd_import, "mcp": cmd_mcp,
+        "browse": cmd_browse,
     }
 
     fn = dispatch.get(args.cmd)
