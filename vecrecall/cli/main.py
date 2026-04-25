@@ -144,6 +144,45 @@ def cmd_add(args, cfg):
     p.close()
 
 
+def cmd_add_file(args, cfg):
+    """从文件存入记忆，支持任意大小，自动识别编码"""
+    path = os.path.expanduser(args.file)
+    if not os.path.exists(path):
+        print(f"✗ 文件不存在: {path}", file=sys.stderr)
+        return
+
+    # 自动识别编码，优先 UTF-8，失败则尝试 GBK
+    text = None
+    for enc in ("utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                text = f.read()
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    if text is None:
+        print(f"✗ 无法识别文件编码: {path}", file=sys.stderr)
+        return
+
+    size_kb = os.path.getsize(path) / 1024
+    print(f"📂 读取文件: {path}")
+    print(f"   大小: {size_kb:.1f} KB  字符数: {len(text):,}")
+
+    p = get_palace(cfg)
+    m = p.add(
+        content=text,
+        topic=args.topic or "general",
+        wing=args.wing or cfg.get("wing"),
+        importance=args.importance,
+        ui_summary=args.summary or "",
+    )
+    print(f"✓ 已存入记忆")
+    print(f"  ID: {m.id}")
+    print(f"  wing={m.wing}  topic={m.topic}  importance={m.importance:.2f}")
+    print(f"  字符数: {len(text):,}  token 估算: {len(text)//4:,}")
+    p.close()
+
 def cmd_search(args, cfg):
     p = get_palace(cfg)
     layer = args.layer or "l3"
@@ -390,6 +429,14 @@ def main():
     p_add.add_argument("--importance", type=float, help="重要性 0-1")
     p_add.add_argument("--summary", help="AAAK 摘要（仅 UI 展示）")
 
+    # add-file
+    p_addf = sub.add_parser("add-file", help="从文件存入记忆（支持大文件，自动识别编码）")
+    p_addf.add_argument("file", help="文件路径")
+    p_addf.add_argument("--topic", help="话题标签")
+    p_addf.add_argument("--wing", help="wing 标识")
+    p_addf.add_argument("--importance", type=float, help="重要性 0-1")
+    p_addf.add_argument("--summary", help="摘要（仅 UI 展示）")
+
     # search
     p_search = sub.add_parser("search", help="语义搜索")
     p_search.add_argument("query")
@@ -455,7 +502,7 @@ def main():
         "context": cmd_context, "stats": cmd_stats, "wings": cmd_wings,
         "topics": cmd_topics, "diary": cmd_diary, "archive": cmd_archive,
         "export": cmd_export, "import": cmd_import, "mcp": cmd_mcp,
-        "browse": cmd_browse,
+        "browse": cmd_browse, "add-file": cmd_add_file,
     }
 
     fn = dispatch.get(args.cmd)
