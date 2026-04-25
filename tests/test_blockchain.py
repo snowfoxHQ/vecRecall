@@ -302,33 +302,37 @@ def test_claude_code_hook():
 
 def test_create_hook_factory():
     print("\n── create_hook 工厂函数 ──")
-    with tempfile.TemporaryDirectory() as d:
-        config = {
-            "db_path": os.path.join(d, "factory.db"),
+
+    def make_config(d, name):
+        return {
+            "db_path": os.path.join(d, f"{name}.db"),
             "wing": "factory-test",
             "context_window_size": 500_000,
             "auto_trigger_threshold": 0.8,
         }
 
-        oc = create_hook("openclaw", config)
+    with tempfile.TemporaryDirectory() as d:
+        oc = create_hook("openclaw", make_config(d, "oc"))
         test("创建 OpenClaw hook", isinstance(oc, OpenClawBlockchainHook))
         test("wing 正确", oc._wing == "factory-test")
         test("窗口大小正确", oc._context_window_size == 500_000)
         oc._chain.close()
 
-        h = create_hook("hermes", config)
+    with tempfile.TemporaryDirectory() as d:
+        h = create_hook("hermes", make_config(d, "h"))
         test("创建 Hermes hook", isinstance(h, HermesBlockchainHook))
         h._chain.close()
 
-        cc = create_hook("claude_code", config)
+    with tempfile.TemporaryDirectory() as d:
+        cc = create_hook("claude_code", make_config(d, "cc"))
         test("创建 Claude Code hook", isinstance(cc, ClaudeCodeBlockchainHook))
         cc._chain.close()
 
-        try:
-            create_hook("unknown", config)
-            test("未知平台应抛出异常", False)
-        except ValueError:
-            test("未知平台正确抛出 ValueError", True)
+    try:
+        create_hook("unknown", {"db_path": ":memory:", "wing": "x"})
+        test("未知平台应抛出异常", False)
+    except ValueError:
+        test("未知平台正确抛出 ValueError", True)
 
 
 def test_multi_wing_isolation():
