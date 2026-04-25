@@ -1,5 +1,34 @@
 **English** | [中文](README.md)
 
+## Changelog v1.0.3
+
+**Date:** April 25, 2026
+
+### What's New
+
+**Blockchain context archive submodule (vecrecall/blockchain/)**
+
+Four new core files:
+
+- `block.py` — Block data structure with full content, timestamp, keywords, and SHA-256 hash chain
+- `chain.py` — Hash-chain management with SQLite persistence, date+keyword search, and auto L1 grouping (every 4 blocks)
+- `indexer.py` — Chinese/English keyword extraction with sliding window for Chinese sub-words
+- `hooks.py` — Platform triggers for OpenClaw, Hermes Agent, and Claude Code
+
+Core feature: archives AI context windows as blocks to break through the single-context-window limit. Auto-triggers at 75% usage, force-archives before compaction, and injects historical key fragments into new context windows.
+
+**New files**
+- `vecrecall/blockchain/__init__.py`
+- `vecrecall/blockchain/block.py`
+- `vecrecall/blockchain/chain.py`
+- `vecrecall/blockchain/indexer.py`
+- `vecrecall/blockchain/hooks.py`
+- `tests/test_blockchain.py` (72/72 passed)
+- `README_BLOCKCHAIN.md`
+- `README_EN.md` (this file)
+
+---
+
 # VecRecall
 
 An improved AI long-term memory system, rebuilt from scratch based on design analysis of the original MemPalace.
@@ -285,3 +314,90 @@ No configuration needed. Takes effect immediately after installing the dependenc
 ### v1.0.0 — April 20, 2026
 
 Initial release. Full reimplementation based on design analysis of MemPalace, with the retrieval path and organization layer fully decoupled.
+
+---
+
+## Blockchain Context Archive Module (v1.0.3)
+
+VecRecall includes a built-in blockchain submodule that archives AI context windows as blocks, breaking through the single-context-window limit.
+
+### Core Idea
+
+```
+Context window 1 (2M tokens) ─→ archived as Block #0
+Context window 2 (2M tokens) ─→ archived as Block #1, injects key fragments from Block #0
+Context window 3 (2M tokens) ─→ archived as Block #2, injects key fragments from history
+...
+Theoretically unlimited stacking — the AI always knows all historical context
+```
+
+### Storage Structure
+
+| Level | Description |
+|-------|-------------|
+| Small block | Full record of one context window |
+| L1 group | 4 small blocks auto-merged |
+| L2 group | 4 L1 groups auto-merged |
+| Search index | Date + keyword index |
+
+### Trigger Conditions
+
+- **Auto trigger (75%)**: Archives when context usage reaches 75%, leaving 25% buffer
+- **Pre-compaction trigger**: Force-archives before context compression — compression ≠ forgetting
+- **Manual trigger**: User initiates archive at any time
+
+### Tamper-proof
+
+Each block contains the SHA-256 hash of the previous block. Any tampering breaks the chain. Call `verify_chain()` at any time to check integrity.
+
+### Supported Platforms
+
+OpenClaw, Hermes Agent, and Claude Code — isolated by wing. See `README_BLOCKCHAIN.md` for details.
+
+### File Structure
+
+```
+vecrecall/blockchain/
+  __init__.py    Module entry
+  block.py       Block / BlockGroup data structures
+  chain.py       BlockChain hash-chain management
+  indexer.py     Keyword extraction (Chinese + English)
+  hooks.py       Triggers for all three platforms
+```
+
+### Quick Start
+
+```python
+from vecrecall.blockchain import BlockChain, create_hook
+
+# Create a chain
+chain = BlockChain(db_path="~/.vr/blockchain/chain.db")
+
+# Archive a block
+block = chain.new_block(
+    content="Full conversation content...",
+    wing="my-project",
+    trigger="auto_75",
+    keywords=["database", "architecture"],
+)
+
+# Search by keywords
+results = chain.search_by_keywords(["database"], date_start="2026-04-01")
+
+# Verify chain integrity
+ok, msg = chain.verify_chain("my-project")
+
+# Use a platform hook
+hook = create_hook("openclaw", {
+    "db_path": "~/.vr/blockchain/chain.db",
+    "wing": "openclaw-agent",
+    "context_window_size": 2_000_000,
+})
+```
+
+### Tests
+
+```bash
+python tests/test_blockchain.py
+# Result: 72/72 passed
+```

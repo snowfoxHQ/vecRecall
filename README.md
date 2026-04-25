@@ -1,5 +1,34 @@
 [English](README_EN.md) | **中文**
 
+## 更新说明 v1.0.3
+
+**更新日期：** 2026年4月25日
+
+### 本次更新内容
+
+**新增区块链上下文存档子模块（vecrecall/blockchain/）**
+
+新增四个核心文件：
+
+- `block.py` — 区块数据结构，每个区块包含完整原文、时间戳、关键词、SHA-256 哈希链
+- `chain.py` — 哈希链管理，SQLite 持久化，支持日期+关键词检索，4个小区块自动合并为L1大区块
+- `indexer.py` — 中英文关键词自动提取，滑动窗口覆盖中文子词，高权重词优先
+- `hooks.py` — 三平台触发器，支持 OpenClaw、Hermes Agent、Claude Code
+
+核心功能：将 AI 模型的上下文窗口按区块存档，突破单次上下文限制。上下文使用量达到 75% 时自动触发存档，压缩前强制存档，AI 进入下一个上下文窗口时可注入历史关键片段。
+
+**新增文件**
+- `vecrecall/blockchain/__init__.py`
+- `vecrecall/blockchain/block.py`
+- `vecrecall/blockchain/chain.py`
+- `vecrecall/blockchain/indexer.py`
+- `vecrecall/blockchain/hooks.py`
+- `tests/test_blockchain.py`（72/72 通过）
+- `README_BLOCKCHAIN.md`
+- `README_EN.md`（新增英文版）
+
+---
+
 # VecRecall
 
 改进版 AI 长期记忆系统。基于对原版 MemPalace 的设计分析重新构建。
@@ -335,3 +364,90 @@ pip install -e .
 ```
 
 升级后直接用 `vr add` 命令存入中文内容即可，无需额外处理。
+
+---
+
+## 区块链上下文存档模块（v1.0.3）
+
+VecRecall 内置区块链子模块，将 AI 模型的上下文窗口按区块存档，突破单次上下文限制。
+
+### 核心思路
+
+```
+上下文窗口 1（200万 token）─→ 存档为区块 #0
+上下文窗口 2（200万 token）─→ 存档为区块 #1，同时注入区块 #0 的关键片段
+上下文窗口 3（200万 token）─→ 存档为区块 #2，同时注入历史关键片段
+...
+理论上无限叠加，AI 始终知道所有历史上下文
+```
+
+### 存储结构
+
+| 层级 | 说明 |
+|------|------|
+| 小区块 | 一个上下文窗口的完整记录 |
+| L1 大区块 | 4 个小区块自动合并 |
+| L2 超大区块 | 4 个 L1 大区块自动合并 |
+| 检索凭证 | 日期 + 关键词索引 |
+
+### 触发时机
+
+- **自动触发（75%）**：上下文使用量达到 75% 时预触发存档
+- **压缩前触发**：上下文压缩前强制存档，压缩不等于遗忘
+- **手动触发**：用户主动存档重要对话
+
+### 不可篡改性
+
+每个区块包含前一个区块的 SHA-256 哈希，任何篡改都会导致哈希链断裂，`verify_chain()` 可随时验证完整性。
+
+### 对接平台
+
+支持 OpenClaw、Hermes Agent、Claude Code 三个平台，按 wing 隔离，互不干扰。详见 `README_BLOCKCHAIN.md`。
+
+### 文件结构
+
+```
+vecrecall/blockchain/
+  __init__.py    模块入口
+  block.py       Block / BlockGroup 数据结构
+  chain.py       BlockChain 哈希链管理
+  indexer.py     关键词提取（中英文）
+  hooks.py       三平台触发器
+```
+
+### 快速使用
+
+```python
+from vecrecall.blockchain import BlockChain, create_hook
+
+# 创建区块链
+chain = BlockChain(db_path="~/.vr/blockchain/chain.db")
+
+# 存入区块
+block = chain.new_block(
+    content="完整对话内容...",
+    wing="my-project",
+    trigger="auto_75",
+    keywords=["数据库", "架构"],
+)
+
+# 按关键词检索
+results = chain.search_by_keywords(["数据库"], date_start="2026-04-01")
+
+# 验证链完整性
+ok, msg = chain.verify_chain("my-project")
+
+# 使用平台 Hook
+hook = create_hook("openclaw", {
+    "db_path": "~/.vr/blockchain/chain.db",
+    "wing": "openclaw-agent",
+    "context_window_size": 2_000_000,
+})
+```
+
+### 测试
+
+```bash
+python tests/test_blockchain.py
+# 结果: 72/72 通过
+```
