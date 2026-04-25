@@ -370,7 +370,9 @@ def create_hook(platform: str, config: dict) -> BlockchainHookBase:
     platform: "openclaw" | "hermes" | "claude_code"
     """
     db_path = os.path.expanduser(config.get("db_path", "~/.vr/blockchain/chain.db"))
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
 
     chain = BlockChain(
         db_path=db_path,
