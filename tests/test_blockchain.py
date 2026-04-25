@@ -314,12 +314,15 @@ def test_create_hook_factory():
         test("创建 OpenClaw hook", isinstance(oc, OpenClawBlockchainHook))
         test("wing 正确", oc._wing == "factory-test")
         test("窗口大小正确", oc._context_window_size == 500_000)
+        oc._chain.close()
 
         h = create_hook("hermes", config)
         test("创建 Hermes hook", isinstance(h, HermesBlockchainHook))
+        h._chain.close()
 
         cc = create_hook("claude_code", config)
         test("创建 Claude Code hook", isinstance(cc, ClaudeCodeBlockchainHook))
+        cc._chain.close()
 
         try:
             create_hook("unknown", config)
