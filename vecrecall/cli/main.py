@@ -183,6 +183,39 @@ def cmd_add_file(args, cfg):
     print(f"  字符数: {len(text):,}  token 估算: {len(text)//4:,}")
     p.close()
 
+
+def cmd_get(args, cfg):
+    """按 ID 查看记忆完整内容"""
+    p = get_palace(cfg)
+    mem = p._kg.get(args.id)
+    if not mem:
+        # 支持短 ID（前8位）模糊匹配
+        conn = p._kg._conn
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE id LIKE ?",
+            (args.id + "%",)
+        ).fetchall()
+        if not rows:
+            print(f"✗ 找不到记忆: {args.id}", file=sys.stderr)
+            p.close()
+            return
+        mem = p._kg._row_to_memory(rows[0])
+
+    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(mem.timestamp))
+    print(f"\n📌 记忆详情")
+    print(f"  ID:         {mem.id}")
+    print(f"  时间:       {ts}")
+    print(f"  wing:       {mem.wing}")
+    print(f"  topic:      {mem.topic}")
+    print(f"  importance: {mem.importance:.2f}")
+    print(f"  字符数:     {len(mem.content):,}")
+    if mem.ui_summary:
+        print(f"  摘要:       {mem.ui_summary}")
+    print(f"\n{'─' * 50}")
+    print(mem.content)
+    print(f"{'─' * 50}")
+    p.close()
+
 def cmd_search(args, cfg):
     p = get_palace(cfg)
     layer = args.layer or "l3"
@@ -482,6 +515,10 @@ def main():
     p_imp = sub.add_parser("import", help="从 JSON 导入")
     p_imp.add_argument("file")
 
+    # get
+    p_get = sub.add_parser("get", help="按 ID 查看记忆完整内容（支持短 ID 前8位）")
+    p_get.add_argument("id", help="记忆 ID 或前8位短 ID")
+
     # browse
     p_browse = sub.add_parser("browse", help="按日期浏览记忆目录")
     p_browse.add_argument("--wing", help="筛选某个 wing")
@@ -503,6 +540,7 @@ def main():
         "topics": cmd_topics, "diary": cmd_diary, "archive": cmd_archive,
         "export": cmd_export, "import": cmd_import, "mcp": cmd_mcp,
         "browse": cmd_browse, "add-file": cmd_add_file,
+        "get": cmd_get,
     }
 
     fn = dispatch.get(args.cmd)
