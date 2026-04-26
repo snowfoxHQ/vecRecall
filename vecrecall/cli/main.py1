@@ -144,78 +144,6 @@ def cmd_add(args, cfg):
     p.close()
 
 
-def cmd_add_file(args, cfg):
-    """从文件存入记忆，支持任意大小，自动识别编码"""
-    path = os.path.expanduser(args.file)
-    if not os.path.exists(path):
-        print(f"✗ 文件不存在: {path}", file=sys.stderr)
-        return
-
-    # 自动识别编码，优先 UTF-8，失败则尝试 GBK
-    text = None
-    for enc in ("utf-8", "utf-8-sig", "gbk", "gb2312", "latin-1"):
-        try:
-            with open(path, "r", encoding=enc) as f:
-                text = f.read()
-            break
-        except (UnicodeDecodeError, LookupError):
-            continue
-
-    if text is None:
-        print(f"✗ 无法识别文件编码: {path}", file=sys.stderr)
-        return
-
-    size_kb = os.path.getsize(path) / 1024
-    print(f"📂 读取文件: {path}")
-    print(f"   大小: {size_kb:.1f} KB  字符数: {len(text):,}")
-
-    p = get_palace(cfg)
-    m = p.add(
-        content=text,
-        topic=args.topic or "general",
-        wing=args.wing or cfg.get("wing"),
-        importance=args.importance,
-        ui_summary=args.summary or "",
-    )
-    print(f"✓ 已存入记忆")
-    print(f"  ID: {m.id}")
-    print(f"  wing={m.wing}  topic={m.topic}  importance={m.importance:.2f}")
-    print(f"  字符数: {len(text):,}  token 估算: {len(text)//4:,}")
-    p.close()
-
-
-def cmd_get(args, cfg):
-    """按 ID 查看记忆完整内容"""
-    p = get_palace(cfg)
-    mem = p._kg.get(args.id)
-    if not mem:
-        # 支持短 ID（前8位）模糊匹配
-        conn = p._kg._conn
-        rows = conn.execute(
-            "SELECT * FROM memories WHERE id LIKE ?",
-            (args.id + "%",)
-        ).fetchall()
-        if not rows:
-            print(f"✗ 找不到记忆: {args.id}", file=sys.stderr)
-            p.close()
-            return
-        mem = p._kg._row_to_memory(rows[0])
-
-    ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(mem.timestamp))
-    print(f"\n📌 记忆详情")
-    print(f"  ID:         {mem.id}")
-    print(f"  时间:       {ts}")
-    print(f"  wing:       {mem.wing}")
-    print(f"  topic:      {mem.topic}")
-    print(f"  importance: {mem.importance:.2f}")
-    print(f"  字符数:     {len(mem.content):,}")
-    if mem.ui_summary:
-        print(f"  摘要:       {mem.ui_summary}")
-    print(f"\n{'─' * 50}")
-    print(mem.content)
-    print(f"{'─' * 50}")
-    p.close()
-
 def cmd_search(args, cfg):
     p = get_palace(cfg)
     layer = args.layer or "l3"
@@ -462,14 +390,6 @@ def main():
     p_add.add_argument("--importance", type=float, help="重要性 0-1")
     p_add.add_argument("--summary", help="AAAK 摘要（仅 UI 展示）")
 
-    # add-file
-    p_addf = sub.add_parser("add-file", help="从文件存入记忆（支持大文件，自动识别编码）")
-    p_addf.add_argument("file", help="文件路径")
-    p_addf.add_argument("--topic", help="话题标签")
-    p_addf.add_argument("--wing", help="wing 标识")
-    p_addf.add_argument("--importance", type=float, help="重要性 0-1")
-    p_addf.add_argument("--summary", help="摘要（仅 UI 展示）")
-
     # search
     p_search = sub.add_parser("search", help="语义搜索")
     p_search.add_argument("query")
@@ -515,10 +435,6 @@ def main():
     p_imp = sub.add_parser("import", help="从 JSON 导入")
     p_imp.add_argument("file")
 
-    # get
-    p_get = sub.add_parser("get", help="按 ID 查看记忆完整内容（支持短 ID 前8位）")
-    p_get.add_argument("id", help="记忆 ID 或前8位短 ID")
-
     # browse
     p_browse = sub.add_parser("browse", help="按日期浏览记忆目录")
     p_browse.add_argument("--wing", help="筛选某个 wing")
@@ -539,8 +455,7 @@ def main():
         "context": cmd_context, "stats": cmd_stats, "wings": cmd_wings,
         "topics": cmd_topics, "diary": cmd_diary, "archive": cmd_archive,
         "export": cmd_export, "import": cmd_import, "mcp": cmd_mcp,
-        "browse": cmd_browse, "add-file": cmd_add_file,
-        "get": cmd_get,
+        "browse": cmd_browse,
     }
 
     fn = dispatch.get(args.cmd)

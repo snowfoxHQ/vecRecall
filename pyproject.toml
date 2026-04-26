@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecrecall"
-version = "1.0.1"
+version = "1.0.4"
 description = "改进版 AI 长期记忆系统：检索与组织解耦，纯语义向量检索，四层记忆栈"
 readme = "README.md"
 requires-python = ">=3.10"

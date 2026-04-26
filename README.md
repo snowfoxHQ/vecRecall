@@ -1,5 +1,51 @@
 [English](README_EN.md) | **中文**
 
+## 更新说明 v1.0.4
+
+**更新日期：** 2026年4月26日
+
+### 本次更新内容
+
+**新增 `vr add-file` 命令（大文件存入）**
+
+解决 Windows 命令行 8191 字符限制导致长内容无法存入的问题。支持任意大小的文件直接存入记忆库，已验证 75,328 字符完整存入。
+
+- 自动识别文件编码（UTF-8 / GBK / GB2312 等）
+- 存入时显示文件大小、字符数和 token 估算
+- 用法：`vr add-file D:\文件.txt --topic 话题 --importance 0.9`
+
+**新增 `vr get` 命令（查看完整内容）**
+
+按 ID 查看记忆的完整原文，不截断。支持完整 ID 和前 8 位短 ID。
+
+- 用法：`vr get ID前8位`
+- 显示完整内容、时间、wing、topic、字符数等信息
+
+**新增 `vr browse` 命令（记忆目录）**
+
+按日期浏览记忆目录，一行两段格式，不占空间。
+
+- 用法：`vr browse` / `vr browse --all` / `vr browse --wing 项目名`
+- 格式：`2026-04-26  |  [devlog] VecRecall 开发日志  [test] 测试记录`
+
+### 完整工作流
+
+```powershell
+# 存入大文件
+vr add-file D:\笔记.txt --topic notes --importance 0.9
+
+# 浏览记忆目录
+vr browse
+
+# 语义搜索
+vr search "关键词"
+
+# 查看完整内容
+vr get ID前8位
+```
+
+---
+
 ## 更新说明 v1.0.3
 
 **更新日期：** 2026年4月25日

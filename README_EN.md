@@ -1,5 +1,52 @@
 **English** | [中文](README.md)
 
+## Changelog v1.0.4
+
+**Date:** April 26, 2026
+
+### What's New
+
+**New `vr add-file` command (large file input)**
+
+Solves the Windows command-line 8191-character limit that prevented long content from being stored. Supports files of any size. Verified working with 75,328 characters stored in full.
+
+- Auto-detects file encoding (UTF-8 / GBK / GB2312 etc.)
+- Shows file size, character count, and token estimate on store
+- Usage: `vr add-file D:ile.txt --topic topic --importance 0.9`
+
+**New `vr get` command (view full content)**
+
+View the complete raw content of a memory by ID, without truncation. Supports full ID or 8-character short ID.
+
+- Usage: `vr get first8chars`
+- Shows full content, timestamp, wing, topic, character count
+
+**New `vr browse` command (memory directory)**
+
+Browse memories by date in a compact one-line-two-column format.
+
+- Usage: `vr browse` / `vr browse --all` / `vr browse --wing project`
+- Format: `2026-04-26  |  [devlog] VecRecall dev log  [test] test record`
+
+### Full Workflow
+
+```powershell
+# Store a large file
+vr add-file D:
+otes.txt --topic notes --importance 0.9
+
+# Browse memory directory
+vr browse
+
+# Semantic search
+vr search "keyword"
+
+# View full content
+vr get first8chars
+```
+
+---
+
 ## Changelog v1.0.3
 
 **Date:** April 25, 2026
