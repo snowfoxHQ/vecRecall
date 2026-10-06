@@ -16,7 +16,13 @@ from typing import Any
 # 把父目录加入 path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
+<<<<<<< HEAD
 from vecrecall.core.engine import VecRecall, NumpyVectorBackend, HashEmbeddingBackend
+=======
+from vecrecall.core.engine import (
+    VecRecall, build_embedding_backend, memory_to_dict,
+)
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
 
 # ─────────────────────────────────────────────
 # MCP 协议基础（stdio JSON-RPC）
@@ -90,6 +96,59 @@ TOOLS = [
             "required": ["memory_id", "importance"],
         },
     },
+<<<<<<< HEAD
+=======
+    {
+        "name": "mp_update",
+        "description": "更新记忆内容/话题/重要性/摘要；content 变化时自动重新向量化",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string"},
+                "content": {"type": "string"},
+                "topic": {"type": "string"},
+                "importance": {"type": "number"},
+                "ui_summary": {"type": "string"},
+            },
+            "required": ["memory_id"],
+        },
+    },
+    {
+        "name": "mp_delete",
+        "description": "删除一条记忆（向量索引与 SQLite 同步移除）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"memory_id": {"type": "string"}},
+            "required": ["memory_id"],
+        },
+    },
+    {
+        "name": "mp_prune",
+        "description": "清理低价值记忆（重要性低于阈值或早于 N 天）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "min_importance": {"type": "number"},
+                "older_than_days": {"type": "number"},
+                "wing": {"type": "string"},
+                "dry_run": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "mp_reindex",
+        "description": "从 SQLite 原文重建全部向量索引（嵌入后端迁移/索引损坏恢复）",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "mp_verify",
+        "description": "验证哈希链完整性，检测记忆原文是否被篡改",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"wing": {"type": "string"}},
+        },
+    },
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
 
     # ── 检索类（核心：全部走纯向量，无结构过滤）──
     {
@@ -101,6 +160,11 @@ TOOLS = [
                 "query": {"type": "string"},
                 "n": {"type": "integer", "default": 10},
                 "min_score": {"type": "number", "default": 0.0},
+<<<<<<< HEAD
+=======
+                "hybrid": {"type": "boolean", "default": False,
+                           "description": "融合相似度+重要性+时间新鲜度重排"},
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
             },
             "required": ["query"],
         },
@@ -181,6 +245,26 @@ TOOLS = [
         },
     },
     {
+<<<<<<< HEAD
+=======
+        "name": "mp_list_memories",
+        "description": "回吐记忆列表（结构化清单，含 ID/摘要/重要性/预览，可选原文），供调用方浏览、挑选或引用",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "可选，筛选某个 wing"},
+                "topic": {"type": "string", "description": "可选，筛选某个话题"},
+                "limit": {"type": "integer", "default": 50},
+                "offset": {"type": "integer", "default": 0},
+                "full": {"type": "boolean", "default": False,
+                         "description": "True 时返回原文与 metadata"},
+                "sort": {"type": "string", "enum": ["importance", "recent"],
+                         "default": "importance"},
+            },
+        },
+    },
+    {
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
         "name": "mp_browse_wing",
         "description": "浏览某个 wing 下的记忆（UI 展示，不走向量检索）",
         "inputSchema": {
@@ -369,13 +453,40 @@ TOOLS = [
 
 class MCPServer:
 
+<<<<<<< HEAD
     def __init__(self, base_dir: str, wing: str = "default"):
+=======
+    def __init__(self, base_dir: str, wing: str = "default",
+                 use_blockchain: bool = False, embedding_backend=None,
+                 vector_backend=None, extractor=None,
+                 encryption_key: str | None = None):
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
         self._palace = VecRecall(
             base_dir=base_dir,
             wing=wing,
             identity_prompt=f"[VecRecall] Wing: {wing}",
+<<<<<<< HEAD
         )
         self._wing = wing
+=======
+            use_blockchain=use_blockchain,
+            embedding_backend=embedding_backend,
+            vector_backend=vector_backend,
+            extractor=extractor,
+            encryption_key=encryption_key,
+        )
+        self._wing = wing
+        self._base_dir = os.path.realpath(base_dir)
+
+    def _safe_path(self, p: str) -> str:
+        """将路径限制在数据目录内，防止任意文件读写。"""
+        base = os.path.realpath(self._base_dir)
+        target = os.path.realpath(os.path.expanduser(p))
+        if target != base and not target.startswith(base + os.sep):
+            raise ValueError(
+                f"路径越界：只允许访问数据目录内的文件（{base}）")
+        return target
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
 
     def handle(self, req: dict) -> None:
         req_id = req.get("id")
@@ -420,6 +531,7 @@ class MCPServer:
             return {"added": len(ms), "ids": [m.id for m in ms]}
 
         elif name == "mp_update_importance":
+<<<<<<< HEAD
             # 更新重要性：重新 save 到 SQLite
             m = p._kg.get(args["memory_id"])
             if not m:
@@ -431,6 +543,47 @@ class MCPServer:
         elif name == "mp_search":
             results = p.search(args["query"], args.get("n", 10),
                                args.get("min_score", 0.0))
+=======
+            m = p.update(args["memory_id"], importance=args["importance"])
+            return {"ok": True, "importance": m.importance}
+
+        elif name == "mp_update":
+            m = p.update(
+                args["memory_id"],
+                content=args.get("content"),
+                topic=args.get("topic"),
+                importance=args.get("importance"),
+                ui_summary=args.get("ui_summary"),
+            )
+            return {"ok": True, "id": m.id, "importance": m.importance}
+
+        elif name == "mp_delete":
+            ok = p.delete(args["memory_id"])
+            return {"ok": ok, "deleted": ok}
+
+        elif name == "mp_prune":
+            victims = p.prune(
+                min_importance=args.get("min_importance"),
+                older_than_days=args.get("older_than_days"),
+                wing=args.get("wing"),
+                dry_run=args.get("dry_run", True),
+            )
+            return {"candidates": len(victims),
+                    "dry_run": args.get("dry_run", True),
+                    "ids": [m.id for m in victims[:200]]}
+
+        elif name == "mp_reindex":
+            count = p.reindex()
+            return {"reindexed": count}
+
+        elif name == "mp_verify":
+            return p.verify_integrity(args.get("wing"))
+
+        elif name == "mp_search":
+            results = p.search(args["query"], args.get("n", 10),
+                               args.get("min_score", 0.0),
+                               args.get("hybrid", False))
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
             return _format_results(results)
 
         elif name == "mp_build_context":
@@ -438,6 +591,10 @@ class MCPServer:
                 args.get("current_query", ""),
                 args.get("load_l2", True),
                 args.get("load_l3", False),
+<<<<<<< HEAD
+=======
+                args.get("hybrid", False),
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
             )
             return {
                 "l0": ctx.l0_identity,
@@ -484,6 +641,19 @@ class MCPServer:
         elif name == "mp_list_topics":
             return {"topics": p.list_topics(args.get("wing"))}
 
+<<<<<<< HEAD
+=======
+        elif name == "mp_list_memories":
+            return p.list_memories(
+                wing=args.get("wing"),
+                topic=args.get("topic"),
+                limit=args.get("limit", 50),
+                offset=args.get("offset", 0),
+                full=args.get("full", False),
+                sort=args.get("sort", "importance"),
+            )
+
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
         elif name == "mp_browse_wing":
             mems = p._kg.top_by_importance(args["wing"], args.get("limit", 20))
             return {"wing": args["wing"], "memories": [_mem_dict(m) for m in mems]}
@@ -495,7 +665,12 @@ class MCPServer:
             if "wing" in args:
                 q += " AND wing=?"
                 params.append(args["wing"])
+<<<<<<< HEAD
             q += f" ORDER BY importance DESC LIMIT {args.get('limit', 20)}"
+=======
+            q += " ORDER BY importance DESC LIMIT ?"
+            params.append(int(args.get("limit", 20)))
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
             rows = conn.execute(q, params).fetchall()
             mems = [p._kg._row_to_memory(r) for r in rows]
             return {"memories": [_mem_dict(m) for m in mems]}
@@ -556,13 +731,24 @@ class MCPServer:
         elif name == "mp_export_wing":
             mems = p._kg.top_by_importance(args["wing"], 99999)
             data = [_mem_dict(m, full=True) for m in mems]
+<<<<<<< HEAD
             out = args.get("output_path", f"{args['wing']}_export.json")
+=======
+            out = args.get("output_path") or os.path.join(
+                self._base_dir, f"{args['wing']}_export.json")
+            out = self._safe_path(out)
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
             with open(out, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             return {"exported": len(data), "path": out}
 
         elif name == "mp_import_json":
+<<<<<<< HEAD
             with open(args["path"], encoding="utf-8") as f:
+=======
+            path = self._safe_path(args["path"])
+            with open(path, encoding="utf-8") as f:
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
                 data = json.load(f)
             items = [{"content": d["content"], "topic": d.get("topic", "general"),
                       "wing": d.get("wing"), "importance": d.get("importance"),
@@ -625,6 +811,7 @@ class MCPServer:
 # ─────────────────────────────────────────────
 
 def _mem_dict(m, full: bool = False) -> dict:
+<<<<<<< HEAD
     d = {
         "id": m.id,
         "wing": m.wing,
@@ -639,6 +826,9 @@ def _mem_dict(m, full: bool = False) -> dict:
         d["session_id"] = m.session_id
         d["metadata"] = m.metadata
     return d
+=======
+    return memory_to_dict(m, full=full)
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
 
 def _format_results(results) -> list[dict]:
     return [
@@ -666,9 +856,33 @@ def main():
     parser.add_argument("--dir", default=os.path.expanduser("~/.vecrecall"),
                         help="数据存储目录")
     parser.add_argument("--wing", default="default", help="默认 wing")
+<<<<<<< HEAD
     args = parser.parse_args()
 
     server = MCPServer(base_dir=args.dir, wing=args.wing)
+=======
+    parser.add_argument("--chain", action="store_true",
+                        help="启用哈希链防篡改（写入记忆时生成区块）")
+    parser.add_argument("--embedder", default="auto",
+                        choices=["auto", "bow", "sentence", "ollama", "api"],
+                        help="嵌入后端（默认 auto）")
+    parser.add_argument("--embed-model", default=None, help="嵌入模型名")
+    parser.add_argument("--embed-url", default=None,
+                        help="Ollama 或 API 服务地址")
+    parser.add_argument("--embed-api-key", default=None, help="远程 API Key")
+    parser.add_argument("--encrypt-key", default=None,
+                        help="静态加密密钥（或用环境变量 VR_ENCRYPTION_KEY）")
+    args = parser.parse_args()
+
+    emb = build_embedding_backend(
+        args.embedder, model=args.embed_model,
+        base_url=args.embed_url, api_key=args.embed_api_key,
+    )
+    enc = args.encrypt_key or os.environ.get("VR_ENCRYPTION_KEY")
+    server = MCPServer(base_dir=args.dir, wing=args.wing,
+                       use_blockchain=args.chain, embedding_backend=emb,
+                       encryption_key=enc)
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
     server.run()
 
 

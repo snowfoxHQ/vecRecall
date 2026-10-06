@@ -14,6 +14,16 @@ VecRecall Blockchain — 测试套件
 """
 
 import sys, os, tempfile, time, json
+<<<<<<< HEAD
+=======
+
+# Windows GBK 控制台修正
+if sys.stdout.encoding and sys.stdout.encoding.upper() not in ('UTF-8', 'UTF8'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding and sys.stderr.encoding.upper() not in ('UTF-8', 'UTF8'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+>>>>>>> d636dfed8d506e0976414d5cb440e6499a643c6f
 _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _root)
 

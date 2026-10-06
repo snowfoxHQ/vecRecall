@@ -4,8 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecrecall"
+
 version = "1.0.4"
 description = "改进版 AI 长期记忆系统：检索与组织解耦，纯语义向量检索，四层记忆栈"
+version = "2.0.0"
+description = "认知记忆系统：检索与组织解耦，纯语义向量检索，四层记忆栈，LLM 认知层"
+
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -17,9 +21,16 @@ chroma = ["chromadb>=0.5"]
 sentence = ["sentence-transformers>=3.0"]
 full = ["chromadb>=0.5", "sentence-transformers>=3.0"]
 
+crypto = ["cryptography>=42.0"]
+full = ["chromadb>=0.5", "sentence-transformers>=3.0", "cryptography>=42.0"]
+
 [project.scripts]
 vr = "vecrecall.cli.main:main"
 vr-mcp = "vecrecall.mcp.server:main"
+
+
+vr-api = "vecrecall.api.server:main"
+
 
 [tool.setuptools.packages.find]
 where = ["."]
