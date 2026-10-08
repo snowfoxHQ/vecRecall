@@ -1,5 +1,9 @@
 # VecRecall v2.0
 
+[![版本](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/snowfoxHQ/vecRecall)
+[![许可证](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10+-brightgreen)](https://python.org)
+
 认知记忆系统。基于对原版 MemPalace 的设计分析重新构建，v2.0 新增 **LLM 认知层**（写入时自动抽取实体/关系/摘要/话题 + 语义去重合并）、**时序知识图谱**、**遗忘曲线与主动蒸馏**、**多跳向量+图谱混合检索**、**静态加密（at-rest）**、**语义嵌入升级**（subword 增强词法 + 多语言语义模型）。
 
 ## 与原版的核心区别
