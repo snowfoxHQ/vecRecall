@@ -44,6 +44,7 @@ from vecrecall.core.extractor import (
 )
 from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
+from vecrecall.core.guard import redact_secrets
 from vecrecall.core.temporal_graph import TemporalGraph
 
 
@@ -757,6 +758,8 @@ class VecRecall:
         dedup: bool = True,
         dedup_threshold: float = 0.92,
         encryption_key: str | None = None,
+        # 命中疑似凭据时的处理：redact（脱敏后写入）/ reject（拒绝写入）/ allow（放行）
+        on_sensitive: str = "redact",
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -768,6 +771,8 @@ class VecRecall:
         # 语义去重：相似度 ≥ 阈值时合并到既有记忆（避免重复）
         self.dedup = dedup
         self.dedup_threshold = dedup_threshold
+        # 凭据护栏策略（见 core/guard.py）
+        self.on_sensitive = on_sensitive
 
         # 存储后端：自动检测可用的最佳后端
         if embedding_backend is not None:
@@ -810,7 +815,8 @@ class VecRecall:
     def add(self, content: str, topic: str = "general",
             wing: str | None = None, importance: float | None = None,
             session_id: str = "", ui_summary: str = "",
-            metadata: dict | None = None, dedup: bool | None = None) -> Memory:
+            metadata: dict | None = None, dedup: bool | None = None,
+            on_sensitive: str | None = None) -> Memory:
         """
         存入一条记忆。
 
@@ -820,6 +826,17 @@ class VecRecall:
         - 配置了 extractor 时，自动抽取 topic/importance/摘要/实体/关系
         - 语义去重：相似度 ≥ dedup_threshold 时合并到既有记忆（occurrences+1）
         """
+        # 凭据护栏：记忆明文落盘，且必须明文嵌入才能检索 —— 凭据一旦入库
+        # 就无法事后补救（加密等于放弃检索），所以唯一可靠的拦截时机是写入前。
+        policy = (on_sensitive or self.on_sensitive or "redact").lower()
+        if policy != "allow":
+            content, kinds = redact_secrets(content)
+            if kinds and policy == "reject":
+                raise ValueError(
+                    f"疑似包含{'、'.join(kinds)}，已拒绝写入。"
+                    "请去掉敏感值后重试，或只记录变量名（如 DB_URL）。"
+                )
+
         w = wing or self.wing
 
         # 认知层抽取（仅在未显式提供时填充）
