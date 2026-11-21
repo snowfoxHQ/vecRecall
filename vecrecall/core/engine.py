@@ -44,7 +44,6 @@ from vecrecall.core.extractor import (
 )
 from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
-from vecrecall.core.guard import redact_secrets
 from vecrecall.core.temporal_graph import TemporalGraph
 
 
@@ -119,6 +118,7 @@ class RetrievalResult:
     memory: Memory
     score: float        # 余弦相似度，0-1
     layer: str          # L1 / L2 / L3
+    acceptance: dict | None = None  # 三项验收结果（可选，不影响默认排序）
 
 
 @dataclass
@@ -758,8 +758,7 @@ class VecRecall:
         dedup: bool = True,
         dedup_threshold: float = 0.92,
         encryption_key: str | None = None,
-        # 命中疑似凭据时的处理：redact（脱敏后写入）/ reject（拒绝写入）/ allow（放行）
-        on_sensitive: str = "redact",
+        redact_payloads: bool = False,
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -771,8 +770,8 @@ class VecRecall:
         # 语义去重：相似度 ≥ 阈值时合并到既有记忆（避免重复）
         self.dedup = dedup
         self.dedup_threshold = dedup_threshold
-        # 凭据护栏策略（见 core/guard.py）
-        self.on_sensitive = on_sensitive
+        # 写入前脱敏（不可逆，默认关闭；与加密互补，加密不阻止写入库）
+        self.redact_payloads = bool(redact_payloads)
 
         # 存储后端：自动检测可用的最佳后端
         if embedding_backend is not None:
@@ -815,8 +814,7 @@ class VecRecall:
     def add(self, content: str, topic: str = "general",
             wing: str | None = None, importance: float | None = None,
             session_id: str = "", ui_summary: str = "",
-            metadata: dict | None = None, dedup: bool | None = None,
-            on_sensitive: str | None = None) -> Memory:
+            metadata: dict | None = None, dedup: bool | None = None) -> Memory:
         """
         存入一条记忆。
 
@@ -826,18 +824,21 @@ class VecRecall:
         - 配置了 extractor 时，自动抽取 topic/importance/摘要/实体/关系
         - 语义去重：相似度 ≥ dedup_threshold 时合并到既有记忆（occurrences+1）
         """
-        # 凭据护栏：记忆明文落盘，且必须明文嵌入才能检索 —— 凭据一旦入库
-        # 就无法事后补救（加密等于放弃检索），所以唯一可靠的拦截时机是写入前。
-        policy = (on_sensitive or self.on_sensitive or "redact").lower()
-        if policy != "allow":
-            content, kinds = redact_secrets(content)
-            if kinds and policy == "reject":
-                raise ValueError(
-                    f"疑似包含{'、'.join(kinds)}，已拒绝写入。"
-                    "请去掉敏感值后重试，或只记录变量名（如 DB_URL）。"
-                )
-
         w = wing or self.wing
+
+        redaction_counts: dict[str, int] = {}
+        if self.redact_payloads:
+            from vecrecall.core.redaction import (
+                has_meaningful_payload,
+                redact_memory_payload,
+            )
+            redacted = redact_memory_payload(content)
+            if not has_meaningful_payload(redacted.text):
+                raise ValueError("content is empty after redaction")
+            content = redacted.text
+            redaction_counts = dict(redacted.counts)
+            if ui_summary:
+                ui_summary = redact_memory_payload(ui_summary).text
 
         # 认知层抽取（仅在未显式提供时填充）
         ext: Extraction | None = None
@@ -856,6 +857,8 @@ class VecRecall:
             importance = self._heuristic_importance(content)
 
         meta = dict(metadata or {})
+        if redaction_counts:
+            meta["redaction_counts"] = redaction_counts
         if ext is not None:
             if ext.entities:
                 meta.setdefault("entities", ext.entities)
@@ -1021,9 +1024,20 @@ class VecRecall:
     # ── 搜索 ──────────────────────────────────
 
     def search(self, query: str, n: int = 10, min_score: float = 0.0,
-               hybrid: bool = False) -> list[RetrievalResult]:
-        """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排"""
-        return self._deep_search(query, n, min_score=min_score, hybrid=hybrid)
+               hybrid: bool = False,
+               acceptance_query: str | None = None) -> list[RetrievalResult]:
+        """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
+
+        acceptance_query 给定时，对每条结果附加三项验收结果（同边界/同行为/
+        可执行），不改变召回和排序，调用方自行决定是否采信。
+        """
+        results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid)
+        if acceptance_query is not None:
+            from vecrecall.core.recall_policy import evaluate_memory
+            for result in results:
+                verdict = evaluate_memory(result.memory.content, acceptance_query)
+                result.acceptance = verdict.as_dict()
+        return results
 
     # ── 遗忘曲线 ──────────────────────────────
 

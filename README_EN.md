@@ -1,6 +1,8 @@
 [中文](README.md) | **English**
 
-# VecRecall v2.0
+# VecRecall v2.1
+
+> Full release history: [CHANGELOG.md](CHANGELOG.md).
 
 A cognitive memory system. Rebuilt from a design analysis of the original MemPalace, v2.0 adds an **LLM cognitive layer** (automatic entity / relation / summary / topic extraction on write + semantic dedup & merge), a **temporal knowledge graph**, **forgetting curves & active distillation**, **multi-hop vector+graph hybrid retrieval**, **at-rest encryption**, and a **semantic embedding upgrade** (subword-augmented lexical + multilingual semantic model).
 
@@ -272,6 +274,39 @@ VR_ENCRYPTION_KEY="..." vr add "..."  # Runtime override via env var (applies to
 
 ---
 
+### Write Governance, Retrieval Decisions, and Repository Map (v2.1)
+
+v2.1 adds four independently opt-in mechanisms; default behavior is unchanged:
+
+- **Pre-write redaction**: `redact_memory_payload()` uses a prioritized rule table for 8 sensitive classes (private keys, tokens, cookies, API keys, emails, etc.), with a whitelist so `${VAR}` / `example` are not false positives. `VecRecall(redact_payloads=True)` redacts before persistence and records counts in `metadata.redaction_counts`. Redaction is irreversible and off by default; it complements at-rest encryption (encryption does not prevent plaintext from being written).
+- **Writeback governance**: `WritebackGovernor` supplies idempotency keys, a buffer triggered by turn / char / message / idle limits, and retries. `SqliteOutbox` persists pending writebacks in the `writeback_outbox` table of `knowledge.db`; use `vr writeback stats|recover` to inspect or recover.
+- **Retrieval decisions**: `decide_recall(query, context)` decides whether retrieval is worthwhile, `build_query_intent()` normalizes the query, and `evaluate_memory()` applies three acceptance checks (same boundary / same behavior / actionable). MCP exposes `mp_recall_policy` and `mp_accept_memory`; `mp_search`'s `acceptance_query` attaches verdicts **without changing recall or ranking**.
+- **Repository map**: `vr repo-map build|update|validate` writes structure, entry points, module responsibilities and git evidence into `.vecrecall/repo/`, updates incrementally from a baseline SHA, and validates the bundle. The output is **never indexed as vectors** — it stays explicit context, preserving retrieval/organization decoupling.
+
+```python
+from vecrecall import (
+    VecRecall, redact_memory_payload, decide_recall,
+    evaluate_memory, build_repo_map, validate_repo_map,
+)
+
+print(decide_recall("Why did the earlier API migration fail?").should_recall)  # True
+palace = VecRecall("~/.vr", redact_payloads=True)
+palace.add("token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789'")
+
+report = build_repo_map(".")
+print(report["git_status"], validate_repo_map(".")["ok"])
+```
+
+```bash
+vr recall-policy "Why did the earlier API migration fail?"
+vr writeback stats
+vr repo-map build --repo .
+vr repo-map update --repo .
+vr repo-map validate --repo .
+```
+
+---
+
 ### MCP Server (Claude Code / Gemini CLI)
 
 ```bash
@@ -373,7 +408,11 @@ The threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `pa
 
 ---
 
-## MCP Tools (32 total)
+## MCP Tools (34 total)
+
+**Retrieval decisions (v2.1)**
+- `mp_recall_policy` — decide whether the current task warrants retrieval, with a normalized query intent
+- `mp_accept_memory` — three acceptance checks (same boundary / same behavior / actionable); `mp_search`'s `acceptance_query` attaches verdicts without changing ranking
 
 **Write**
 - `mp_add` — Store a single memory
@@ -486,6 +525,12 @@ python tests/test_core.py
 python tests/test_blockchain.py
 # Result: 72/72 passed
 ```
+
+---
+
+## v2.1 Upgrade Notes (Governance Layer)
+
+v2.1 leaves the v2.0 cognitive layer and retrieval semantics untouched and adds governance only: pre-write redaction (`redact_payloads`, opt-in and irreversible), writeback governance (idempotency / buffering / retries + `writeback_outbox`), retrieval decisions (three checks attached without changing ranking), and repository maps (`vr repo-map`, never vector-indexed). New CLI subcommands: `writeback` / `recall-policy` / `repo-map`; MCP tools grow from 32 to 34. The version is uniformly `2.1.0` in `pyproject.toml`, `vecrecall/__init__.py`, `api/server.py`, and `mcp/server.py`.
 
 ---
 

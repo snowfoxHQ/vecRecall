@@ -1,8 +1,10 @@
-# VecRecall v2.0
+# VecRecall v2.1
 
-[![版本](https://img.shields.io/badge/version-2.0.0-blue)](https://github.com/snowfoxHQ/vecRecall)
+[![版本](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/snowfoxHQ/vecRecall)
 [![许可证](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-brightgreen)](https://python.org)
+
+> 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 认知记忆系统。基于对原版 MemPalace 的设计分析重新构建，v2.0 新增 **LLM 认知层**（写入时自动抽取实体/关系/摘要/话题 + 语义去重合并）、**时序知识图谱**、**遗忘曲线与主动蒸馏**、**多跳向量+图谱混合检索**、**静态加密（at-rest）**、**语义嵌入升级**（subword 增强词法 + 多语言语义模型）。
 
@@ -274,6 +276,39 @@ VR_ENCRYPTION_KEY="..." vr add "..."  # 环境变量运行时覆盖（对所有�
 
 ---
 
+### 写入治理、检索决策与仓库知识映射（v2.1）
+
+v2.1 增加四组可独立启用的治理机制，默认不改变既有行为：
+
+- **写入前脱敏**：`redact_memory_payload()` 用带优先级的规则表识别私钥、令牌、Cookie、API Key、邮箱等 8 类敏感信息，白名单避免误伤 `${VAR}` / `example`。`VecRecall(redact_payloads=True)` 在落库前脱敏，并把统计写入 `metadata.redaction_counts`。脱敏不可逆，默认关闭；与静态加密互补（加密不阻止原文写入）。
+- **写回治理**：`WritebackGovernor` 提供幂等键、按 turn / 字符 / 消息数 / idle 四维触发的缓冲和失败重试；`SqliteOutbox` 把待写回任务持久化到 `knowledge.db` 的 `writeback_outbox` 表，可用 `vr writeback stats|recover` 查看与恢复。
+- **检索决策**：`decide_recall(query, context)` 判断当前任务是否值得检索，`build_query_intent()` 规范化查询，`evaluate_memory()` 做三项验收（同边界 / 同行为 / 可执行）。MCP 暴露 `mp_recall_policy`、`mp_accept_memory`；`mp_search` 的 `acceptance_query` 会附加验收结果但**不改变召回和排序**。
+- **仓库知识映射**：`vr repo-map build|update|validate` 把仓库结构、入口、模块职责与 git 证据写入仓库内 `.vecrecall/repo/`，按 baseline SHA 增量更新并校验产物。该产物**不进入向量索引**，只作为显式上下文，保持"检索与组织解耦"。
+
+```python
+from vecrecall import (
+    VecRecall, redact_memory_payload, decide_recall,
+    evaluate_memory, build_repo_map, validate_repo_map,
+)
+
+print(decide_recall("之前那个 API 迁移为什么失败了？").should_recall)  # True
+palace = VecRecall("~/.vr", redact_payloads=True)
+palace.add("token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789'")
+
+report = build_repo_map(".")
+print(report["git_status"], validate_repo_map(".")["ok"])
+```
+
+```bash
+vr recall-policy "之前那个 API 迁移为什么失败了？"
+vr writeback stats
+vr repo-map build --repo .
+vr repo-map update --repo .
+vr repo-map validate --repo .
+```
+
+---
+
 ### MCP 服务器（Claude Code / Gemini CLI）
 
 ```bash
@@ -375,7 +410,11 @@ L2 的改动是关键：原版用 Room 名称匹配触发，VecRecall 改为语�
 
 ---
 
-## MCP 工具列表（共 32 个）
+## MCP 工具列表（共 34 个）
+
+**检索决策（v2.1）**
+- `mp_recall_policy` — 判断当前任务是否值得检索，并给出规范化查询意图
+- `mp_accept_memory` — 三项验收（同边界 / 同行为 / 可执行）；`mp_search` 的 `acceptance_query` 只附加验收、不改排序
 
 **写入**
 - `mp_add` — 写入单条记忆
@@ -488,6 +527,12 @@ python tests/test_core.py
 python tests/test_blockchain.py
 # 结果: 72/72 通过
 ```
+
+---
+
+## v2.1 升级说明（治理层）
+
+v2.1 不改变 v2.0 的认知层与检索语义，只补治理层：写入前脱敏（`redact_payloads`，默认关闭且不可逆）、写回治理（幂等/缓冲/重试 + `writeback_outbox`）、检索决策（三项验收，只附加不改排序）、仓库知识映射（`vr repo-map`，不进向量索引）。新增 CLI 子命令 `writeback` / `recall-policy` / `repo-map`，MCP 工具从 32 增至 34。版本号在 `pyproject.toml`、`vecrecall/__init__.py`、`api/server.py`、`mcp/server.py` 四处统一为 `2.1.0`。
 
 ---
 

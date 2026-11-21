@@ -155,8 +155,34 @@ TOOLS = [
                 "min_score": {"type": "number", "default": 0.0},
                 "hybrid": {"type": "boolean", "default": False,
                            "description": "融合相似度+重要性+时间新鲜度重排"},
+                "acceptance_query": {"type": "string",
+                                     "description": "给结果附加三项验收（同边界/同行为/可执行），不改变排序"},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "mp_recall_policy",
+        "description": "判断当前任务是否需要检索历史记忆，并给出规范化查询意图",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "context": {"type": "string", "description": "当前可见上下文，用于判断是否已含所需事实"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "mp_accept_memory",
+        "description": "按三项验收检查一条记忆是否可用于当前决策",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "candidate": {"type": "string", "description": "记忆原文或 JSON 对象字符串"},
+                "query": {"type": "string"},
+            },
+            "required": ["candidate", "query"],
         },
     },
     {
@@ -475,7 +501,7 @@ class MCPServer:
             _ok(req_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vecrecall", "version": "2.0.0"},
+                "serverInfo": {"name": "vecrecall", "version": "2.1.0"},
             })
         elif method == "tools/list":
             _ok(req_id, {"tools": TOOLS})
@@ -547,8 +573,26 @@ class MCPServer:
         elif name == "mp_search":
             results = p.search(args["query"], args.get("n", 10),
                                args.get("min_score", 0.0),
-                               args.get("hybrid", False))
+                               args.get("hybrid", False),
+                               args.get("acceptance_query"))
             return _format_results(results)
+
+        elif name == "mp_recall_policy":
+            from vecrecall.core.recall_policy import build_query_intent, decide_recall
+            query = args["query"]
+            decision = decide_recall(query, args.get("context"))
+            payload = decision.as_dict()
+            payload["query_intent"] = build_query_intent(query, args.get("context"))
+            return payload
+
+        elif name == "mp_accept_memory":
+            from vecrecall.core.recall_policy import evaluate_memory
+            candidate = args["candidate"]
+            try:
+                parsed = json.loads(candidate)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = candidate
+            return evaluate_memory(parsed, args["query"]).as_dict()
 
         elif name == "mp_build_context":
             ctx = p.build_context(
@@ -770,6 +814,7 @@ def _format_results(results) -> list[dict]:
             "importance": round(r.memory.importance, 3),
             "ui_summary": r.memory.ui_summary,
             "content_preview": r.memory.content[:300],
+            "acceptance": getattr(r, "acceptance", None),
         }
         for r in results
     ]
