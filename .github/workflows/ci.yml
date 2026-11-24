@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.10", "3.11", "3.12"]
+        include:
+          - os: windows-latest
+            python: "3.12"
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # 只装 crypto：让静态加密测试真正执行，而不是被跳过。
+      # 不装 sentence / chroma：测试固定使用零依赖的词法嵌入和内存向量后端。
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[crypto]"
+
+      - name: test_core
+        run: python tests/test_core.py
+      - name: test_blockchain
+        run: python tests/test_blockchain.py
+      - name: test_governance
+        run: python tests/test_governance.py
+      - name: test_recall_policy
+        run: python tests/test_recall_policy.py
+      - name: test_repo_map
+        run: python tests/test_repo_map.py
+
+      # 冒烟：评测脚本能跑通（不下载 LongMemEval，只用仓库内样例）
+      - name: Benchmark smoke
+        run: |
+          python benchmarks/benchmark_recall.py
+          python benchmarks/longmemeval.py --data benchmarks/longmemeval_sample.json --configs vector,hybrid,dedup,graph
+
+  build:
+    name: build & check package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Wheel must not contain tests / benchmarks / scripts
+        shell: python
+        run: |
+          import glob, sys, zipfile
+          whl = glob.glob("dist/*.whl")[0]
+          bad = [n for n in zipfile.ZipFile(whl).namelist()
+                 if n.split("/")[0] in ("tests", "benchmarks", "scripts")]
+          print(whl, "unexpected:", bad)
+          sys.exit(1 if bad else 0)
+
+      - name: Install wheel and smoke test
+        run: |
+          python -m venv /tmp/vr
+          /tmp/vr/bin/pip install dist/*.whl
+          /tmp/vr/bin/vr --help
+          /tmp/vr/bin/python -c "import tempfile; from vecrecall import VecRecall; p = VecRecall(base_dir=tempfile.mkdtemp()); p.add('决定采用 PostgreSQL'); r = p.search('数据库', n=1); assert r and 'PostgreSQL' in r[0].memory.content, r; p.close(); print('ok')"
