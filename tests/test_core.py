@@ -1304,6 +1304,102 @@ def test_topic_key_chains():
         chain.close()
 
 
+
+def test_extension_hooks():
+    """v2.2：扩展钩子（企业版扩展包的挂载点），默认不改变行为"""
+    print("\n── 扩展钩子 ──")
+    from vecrecall.core.hooks import HookRegistry, HOOK_POINTS
+    import vecrecall.core.engine as eng_mod
+    from vecrecall.core import models, vectors, embeddings, storage
+    test("拆分后 engine 仍导出 Memory", eng_mod.Memory is models.Memory)
+    test("拆分后 engine 仍导出 SqliteVectorBackend",
+         eng_mod.SqliteVectorBackend is vectors.SqliteVectorBackend)
+    test("拆分后 engine 仍导出 build_embedding_backend",
+         eng_mod.build_embedding_backend is embeddings.build_embedding_backend)
+    test("拆分后 engine 仍导出 KnowledgeGraph",
+         eng_mod.KnowledgeGraph is storage.KnowledgeGraph)
+    test("四个调用点", set(HOOK_POINTS) ==
+         {"before_write", "after_write", "recall_filter", "on_delete"})
+
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        test("默认无钩子", not any(p.hooks.has(x) for x in HOOK_POINTS))
+
+        # before_write：改写字段
+        def tag(fields):
+            fields["metadata"]["tenant"] = "t1"
+            return fields
+        p.hooks.register("before_write", tag)
+        m = p.add("钩子写入测试：before_write 改写 metadata", dedup=False)
+        test("before_write 可改写字段", m.metadata.get("tenant") == "t1")
+
+        # before_write：抛异常拒绝写入
+        def deny(fields):
+            if "禁止" in fields["content"]:
+                raise PermissionError("denied")
+        p.hooks.register("before_write", deny)
+        try:
+            p.add("这条内容禁止写入", dedup=False)
+            test("before_write 可拒绝写入", False)
+        except PermissionError:
+            test("before_write 可拒绝写入", True)
+        test("被拒绝的内容未落库",
+             all("禁止" not in x.content for x in p._kg.iter_all()))
+        p.hooks.unregister("before_write", deny)
+        p.hooks.unregister("before_write", tag)
+
+        # after_write：审计 sink，含去重合并
+        log = []
+        p.hooks.register("after_write", lambda mem, merged: log.append((mem.id, merged)))
+        a = p.add("after_write 审计 sink 测试内容")
+        b = p.add("after_write 审计 sink 测试内容")
+        test("after_write 新增时触发", log and log[0] == (a.id, False))
+        test("after_write 合并时 merged=True", len(log) == 2 and log[1] == (b.id, True))
+
+        # recall_filter：只能删减
+        p.add("机密项目 Alpha 的预算", dedup=False)
+        p.add("公开项目 Beta 的预算", dedup=False)
+        before = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("过滤前能搜到机密", any("Alpha" in c for c in before))
+
+        def hide_alpha(memories, viewer):
+            return [x for x in memories if "Alpha" not in x.content]
+        p.hooks.register("recall_filter", hide_alpha)
+        after = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("recall_filter 作用于 search", not any("Alpha" in c for c in after))
+        test("recall_filter 保留其余结果", any("Beta" in c for c in after))
+        ctx = p.build_context(current_query="项目 预算", load_l3=True)
+        allc = [r.memory.content for r in
+                ctx.l1_key_moments + ctx.l2_topic_context + ctx.l3_deep_results]
+        test("recall_filter 作用于 build_context", not any("Alpha" in c for c in allc))
+
+        def inject(memories, viewer):
+            fake = models.Memory.create(wing="x", topic="x", content="伪造记忆")
+            return memories + [fake]
+        p.hooks.register("recall_filter", inject)
+        after2 = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("recall_filter 不能新增结果", "伪造记忆" not in after2)
+
+        # on_delete
+        deleted = []
+        p.hooks.register("on_delete", deleted.append)
+        p.delete(a.id)
+        test("on_delete 触发", deleted == [a.id])
+
+        # 插件对象
+        class Plugin:
+            def register(self, registry):
+                registry.register("after_write", lambda mem, merged: None)
+        reg = HookRegistry()
+        reg.install(Plugin())
+        test("插件对象可安装", reg.has("after_write"))
+        try:
+            reg.register("no_such_point", lambda: None)
+            test("未知调用点被拒绝", False)
+        except ValueError:
+            test("未知调用点被拒绝", True)
+        p.close()
+
 def test_core_has_no_scenario_schema():
     """核心无场景 schema：契约等业务适配器属于企业扩展包，核心源码不得出现。"""
     print("\n── 核心边界守护 ──")
@@ -1355,6 +1451,7 @@ def run_all():
     test_typed_memory_routing()
     test_visibility_isolation()
     test_topic_key_chains()
+    test_extension_hooks()
     test_core_has_no_scenario_schema()
 
     print("\n" + "=" * 50)
