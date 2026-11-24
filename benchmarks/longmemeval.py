@@ -166,7 +166,10 @@ def eval_question(q: dict, config: str, embedder, granularity: str,
             contents = [m.content for m in mems]
             ranked_mem = [m.id for m in mems]
         else:
-            res = p.search(q["question"], n=k_max, hybrid=(config == "hybrid"))
+            # hybrid 的时间新鲜度以「提问时刻」为基准：LongMemEval 的会话都在过去，
+            # 若按当前时间计算，所有记忆的新鲜度都接近 0，hybrid 就退化成纯向量
+            res = p.search(q["question"], n=k_max, hybrid=(config == "hybrid"),
+                           as_of=parse_date(q.get("question_date")))
             contents = [r.memory.content for r in res]
             ranked_mem = [r.memory.id for r in res]
         query_ms = (time.perf_counter() - t0) * 1000

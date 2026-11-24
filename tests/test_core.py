@@ -1305,6 +1305,47 @@ def test_topic_key_chains():
 
 
 
+def test_hybrid_as_of():
+    """v2.3：hybrid 的时间新鲜度可按指定时刻计算（as_of），旧记忆库不再退化为纯向量。"""
+    print("\n── hybrid 时间基准 as_of ──")
+    day = 86400.0
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        old = p.add("项目部署方案采用 Kubernetes 集群", importance=0.5, dedup=False)
+        new = p.add("项目部署方案改用 Kubernetes 托管集群", importance=0.5, dedup=False)
+        base = time.time() - 3 * 365 * day          # 两条记忆都在三年前
+        old.timestamp = base - 300 * day             # 更早
+        new.timestamp = base - 1 * day               # 接近提问时刻
+        p._kg.save(old)
+        p._kg.save(new)
+
+        q = "项目部署方案"
+        pure = p.search(q, n=2)
+        now_based = p.search(q, n=2, hybrid=True)
+        at_q = p.search(q, n=2, hybrid=True, as_of=base)
+
+        def gap(res):
+            s = {r.memory.id: r.score for r in res}
+            return s[new.id] - s[old.id]
+
+        sim = {r.memory.id: r.score for r in pure}
+        sim_gap = sim[new.id] - sim[old.id]
+        # 按当前时间：两条都很旧，新鲜度都≈0，hybrid 只是把相似度乘 0.6
+        test("默认 as_of：新鲜度几乎无影响",
+             abs(gap(now_based) - 0.6 * sim_gap) < 1e-3, f"{gap(now_based)} vs {0.6 * sim_gap}")
+        # 按提问时刻：近期记忆的新鲜度明显更高
+        test("as_of=提问时刻：近期记忆得分提升",
+             gap(at_q) > gap(now_based) + 0.1, f"{gap(at_q)} vs {gap(now_based)}")
+        test("as_of=提问时刻：近期记忆排第一", at_q[0].memory.id == new.id)
+        test("as_of 不改变召回集合",
+             {r.memory.id for r in at_q} == {r.memory.id for r in pure})
+
+        ctx = p.build_context(current_query=q, load_l2=False, load_l3=True,
+                              hybrid=True, as_of=base)
+        test("build_context 透传 as_of", ctx.l3_deep_results[0].memory.id == new.id)
+        p.close()
+
+
 def test_search_returns_topn_with_negative_scores():
     """回归：词法嵌入的余弦相似度可以为负，search 默认不能按 0 截断。
 
@@ -1489,6 +1530,7 @@ def run_all():
     test_typed_memory_routing()
     test_visibility_isolation()
     test_topic_key_chains()
+    test_hybrid_as_of()
     test_search_returns_topn_with_negative_scores()
     test_extension_hooks()
     test_core_has_no_scenario_schema()

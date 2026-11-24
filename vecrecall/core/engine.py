@@ -304,6 +304,7 @@ class VecRecall:
         hybrid: bool = False,
         memory_types: list[str] | None = None,
         viewer: str | None = None,
+        as_of: float | None = None,
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
@@ -339,12 +340,13 @@ class VecRecall:
         # L2：语义触发（核心改动：阈值判断，不是 Room 名称匹配）
         l2_results: list[RetrievalResult] = []
         if load_l2 and current_query.strip():
-            l2_results = self._semantic_l2(current_query, hybrid=hybrid)
+            l2_results = self._semantic_l2(current_query, hybrid=hybrid, as_of=as_of)
 
         # L3：全量语义检索
         l3_results: list[RetrievalResult] = []
         if load_l3 and current_query.strip():
-            l3_results = self._deep_search(current_query, self.L3_TOP_K, hybrid=hybrid)
+            l3_results = self._deep_search(current_query, self.L3_TOP_K,
+                                           hybrid=hybrid, as_of=as_of)
 
         # 类型过滤：一处实现，L1/L2/L3 三层统一生效
         if memory_types is not None:
@@ -383,7 +385,8 @@ class VecRecall:
             total_tokens_estimate=total_tokens,
         )
 
-    def _semantic_l2(self, query: str, hybrid: bool = False) -> list[RetrievalResult]:
+    def _semantic_l2(self, query: str, hybrid: bool = False,
+                     as_of: float | None = None) -> list[RetrievalResult]:
         """
         L2 语义触发：查询向量与历史记忆的余弦相似度 ≥ 阈值才返回。
         关键：不使用任何结构过滤条件（不按 wing/topic/room 限制）。
@@ -398,7 +401,7 @@ class VecRecall:
         results = []
         for mid, score in scores.items():
             if mid in mem_map:
-                s = self._hybrid_score(score, mem_map[mid]) if hybrid else score
+                s = self._hybrid_score(score, mem_map[mid], as_of) if hybrid else score
                 results.append(RetrievalResult(
                     memory=mem_map[mid], score=s, layer="L2"
                 ))
@@ -407,7 +410,8 @@ class VecRecall:
         return results[:self.L2_TOP_K]
 
     def _deep_search(self, query: str, n: int, min_score: float | None = None,
-                     hybrid: bool = False) -> list[RetrievalResult]:
+                     hybrid: bool = False,
+                     as_of: float | None = None) -> list[RetrievalResult]:
         """
         L3 全量语义检索：直接命中向量库，无任何过滤条件，
         召回率（R@5）由嵌入质量决定，可用 benchmarks/benchmark_recall.py 复现评测。
@@ -431,7 +435,7 @@ class VecRecall:
                 m = mem_map[mid]
                 if self.owner and not self._visible_to(m, self.owner):
                     continue  # 可见性过滤：private 记忆不泄露给非 owner
-                s = self._hybrid_score(score, m) if hybrid else score
+                s = self._hybrid_score(score, m, as_of) if hybrid else score
                 results.append(RetrievalResult(
                     memory=m, score=s, layer="L3"
                 ))
@@ -439,9 +443,16 @@ class VecRecall:
         results.sort(key=lambda x: x.score, reverse=True)
         return results
 
-    def _hybrid_score(self, sim: float, mem: Memory) -> float:
-        """融合评分：0.6·相似度 + 0.25·重要性 + 0.15·时间新鲜度（指数衰减）"""
-        age_days = max(0.0, time.time() - mem.timestamp) / 86400.0
+    def _hybrid_score(self, sim: float, mem: Memory,
+                      as_of: float | None = None) -> float:
+        """融合评分：0.6·相似度 + 0.25·重要性 + 0.15·时间新鲜度（指数衰减）
+
+        as_of：计算新鲜度的参考时刻（epoch 秒），默认当前时间。
+        记忆库整体较旧、或回放历史对话时，应传入提问时刻；
+        否则所有记忆的新鲜度都接近 0，时间因素失效，hybrid 退化为纯向量排序。
+        """
+        ref = time.time() if as_of is None else as_of
+        age_days = max(0.0, ref - mem.timestamp) / 86400.0
         recency = 0.5 ** (age_days / self.RECENCY_HALF_LIFE_DAYS)
         return 0.6 * sim + 0.25 * mem.importance + 0.15 * recency
 
@@ -477,15 +488,18 @@ class VecRecall:
 
     def search(self, query: str, n: int = 10, min_score: float | None = None,
                hybrid: bool = False,
-               acceptance_query: str | None = None) -> list[RetrievalResult]:
+               acceptance_query: str | None = None,
+               as_of: float | None = None) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
 
         min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
+        as_of：hybrid 计算时间新鲜度的参考时刻（epoch 秒），默认当前时间。
 
         acceptance_query 给定时，对每条结果附加三项验收（同边界/同行为/
         可执行），不改变召回和排序，调用方自行决定是否采信。
         """
-        results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid)
+        results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid,
+                                    as_of=as_of)
         results = self._filter_results(results)
         if acceptance_query is not None:
             from vecrecall.core.recall_policy import evaluate_memory
