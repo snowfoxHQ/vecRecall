@@ -152,7 +152,8 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "n": {"type": "integer", "default": 10},
-                "min_score": {"type": "number", "default": 0.0},
+                "min_score": {"type": "number",
+                              "description": "可选相似度阈值；不传则始终返回 top-n"},
                 "hybrid": {"type": "boolean", "default": False,
                            "description": "融合相似度+重要性+时间新鲜度重排"},
                 "acceptance_query": {"type": "string",
@@ -573,7 +574,7 @@ class MCPServer:
 
         elif name == "mp_search":
             results = p.search(args["query"], args.get("n", 10),
-                               args.get("min_score", 0.0),
+                               args.get("min_score"),
                                args.get("hybrid", False),
                                args.get("acceptance_query"))
             return _format_results(results)

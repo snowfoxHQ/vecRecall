@@ -43,3 +43,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# 评测数据（LongMemEval 等，需自行下载）
+benchmarks/data/

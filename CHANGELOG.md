@@ -14,6 +14,11 @@
 - **按主题查询**：`query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)`。
 - **跨 wing 关联收紧**：`mp_link` 仅对双方 shared 的记忆开放。
 - **核心边界守护**：新增源码断言测试，核心不得出现场景 schema（如 `contract_id`），也不得引用 `vecrecall.adapters`。场景适配器不随核心发布。
+- **代码拆分**：`core/engine.py` 拆出 `models.py` / `vectors.py` / `embeddings.py` / `storage.py`，原有 `from vecrecall.core.engine import ...` 写法保持可用。
+- **扩展钩子**：新增 `core/hooks.py`，提供 `before_write` / `after_write` / `recall_filter` / `on_delete` 四个调用点，支持插件对象与 `vecrecall.plugins` entry point（`VecRecall(load_plugins=True)`）。默认不注册任何钩子，行为不变。
+- **统一凭据规则**：`core/guard.py` 改为委托 `core/redaction.py`，两套规则合并为一套；补充句中赋值（如「数据库 password=[REDACTED_PASSWORD] 别外传」）、较短的 npm token、宽松 JWT 的识别。`find_secrets()` 返回的类型名改为英文（如 `CREDENTIAL`）。
+- **修复：检索丢弃负分结果**。余弦相似度可以为负（词法嵌入在没有共同词时尤其常见），旧版 `search()` 默认 `min_score=0.0`，会把排在后面的真正答案直接丢掉，出现「库里只有 4 条、取 top-5 却返回不到答案」。现在 `search()` 与 L3 检索默认 `min_score=None`，始终返回 top-n；MCP `mp_search` 与 REST `/search` 同步去掉 0.0 默认值。**行为变化**：需要按分数截断的调用方请显式传 `min_score=0.0`。L2 触发阈值（0.55）、去重阈值（0.92）、`graph_search` 默认 0.1 不变。
+- **评测**：新增 `benchmarks/longmemeval.py`（LongMemEval 会话级 / 轮次级检索评测，vector / hybrid / dedup / graph 四种配置对比）与共用指标 `benchmarks/_metrics.py`；内置评测 `benchmark_recall.py` 增加 R@1、R@10、nDCG@10 与 hybrid 对比。
 - **文档**：更正 README 中「记忆原文以明文存储（无 at-rest 加密）」的过时说明；测试章节列出全部测试文件。
 - 版本号在 `pyproject.toml`、`vecrecall/__init__.py`、`api/server.py`、`mcp/server.py` 统一为 `2.2.0`。MCP 工具数保持 34。
 

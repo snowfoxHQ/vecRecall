@@ -238,7 +238,7 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
         if head == "search":
             results = p.search(
                 body["query"], body.get("n", 10),
-                body.get("min_score", 0.0), body.get("hybrid", False),
+                body.get("min_score"), body.get("hybrid", False),
             )
             return {"results": [
                 {**memory_to_dict(r.memory),

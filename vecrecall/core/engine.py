@@ -406,15 +406,20 @@ class VecRecall:
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:self.L2_TOP_K]
 
-    def _deep_search(self, query: str, n: int, min_score: float = 0.0,
+    def _deep_search(self, query: str, n: int, min_score: float | None = None,
                      hybrid: bool = False) -> list[RetrievalResult]:
         """
         L3 全量语义检索：直接命中向量库，无任何过滤条件，
         召回率（R@5）由嵌入质量决定，可用 benchmarks/benchmark_recall.py 复现评测。
         hybrid=True 时对结果做 相似度+重要性+时间 融合重排（不改变召回集合）。
+
+        min_score=None（默认）不按分数过滤，始终返回 top-n。
+        余弦相似度取值 [-1, 1]：词法哈希嵌入在两段文本没有共同词时，相似度会在 0
+        附近正负波动，若默认按 0 截断，排在后面的真正答案会被直接丢掉。
         """
         vec = self._emb.embed(query)
-        raw = self._vec.query(vec, n=n, min_score=min_score)
+        threshold = float("-inf") if min_score is None else min_score
+        raw = self._vec.query(vec, n=n, min_score=threshold)
 
         ids = [r[0] for r in raw]
         scores = {r[0]: r[1] for r in raw}
@@ -470,10 +475,12 @@ class VecRecall:
 
     # ── 搜索 ──────────────────────────────────
 
-    def search(self, query: str, n: int = 10, min_score: float = 0.0,
+    def search(self, query: str, n: int = 10, min_score: float | None = None,
                hybrid: bool = False,
                acceptance_query: str | None = None) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
+
+        min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
 
         acceptance_query 给定时，对每条结果附加三项验收（同边界/同行为/
         可执行），不改变召回和排序，调用方自行决定是否采信。

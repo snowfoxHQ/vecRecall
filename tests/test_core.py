@@ -1305,6 +1305,44 @@ def test_topic_key_chains():
 
 
 
+def test_search_returns_topn_with_negative_scores():
+    """回归：词法嵌入的余弦相似度可以为负，search 默认不能按 0 截断。
+
+    LongMemEval 样例「What breed is my dog?」暴露的问题：只有 4 条记忆、取 top-5，
+    答案却没出现，因为答案的相似度是 -0.024，被默认 min_score=0.0 丢掉了。
+    """
+    print("\n── 回归：负相似度不被截断 ──")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        # 与 benchmarks/longmemeval_sample.json 的 sample_ssu_1 完全一致（含助手轮次），
+        # 去掉助手轮次后相似度不再为负，复现不了问题
+        docs = [
+            "user: Can you suggest a quick pasta recipe for dinner?\n"
+            "assistant: Try garlic butter spaghetti with parmesan.",
+            "user: I just adopted a golden retriever puppy named Max, any training tips?\n"
+            "assistant: Start with crate training and short sessions of basic commands.",
+            "user: What is the capital of Australia?\nassistant: Canberra.",
+            "user: Help me plan a weekend hiking trip near the mountains.\n"
+            "assistant: Pack water, layers and check the trail map.",
+        ]
+        ids = [p.add(x, dedup=False).id for x in docs]
+        q = "What breed is my dog?"
+        raw = p._vec.query(p._emb.embed(q), n=10, min_score=float("-inf"))
+        test("样例中确有负相似度", any(s < 0 for _, s, _ in raw),
+             str([round(s, 3) for _, s, _ in raw]))
+
+        res = p.search(q, n=5)
+        test("默认 search 返回全部 4 条", len(res) == 4, str(len(res)))
+        test("答案记忆在结果中", ids[1] in [r.memory.id for r in res])
+
+        res_thr = p.search(q, n=5, min_score=0.0)
+        test("显式 min_score=0.0 仍可截断", all(r.score >= 0.0 for r in res_thr))
+
+        ctx = p.build_context(current_query=q, load_l2=False, load_l3=True)
+        test("L3 也返回全部 4 条", len(ctx.l3_deep_results) == 4)
+        p.close()
+
+
 def test_extension_hooks():
     """v2.2：扩展钩子（企业版扩展包的挂载点），默认不改变行为"""
     print("\n── 扩展钩子 ──")
@@ -1451,6 +1489,7 @@ def run_all():
     test_typed_memory_routing()
     test_visibility_isolation()
     test_topic_key_chains()
+    test_search_returns_topn_with_negative_scores()
     test_extension_hooks()
     test_core_has_no_scenario_schema()
 
