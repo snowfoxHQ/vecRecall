@@ -190,8 +190,42 @@ def test_engine_integration() -> None:
         engine.close()
 
 
+def test_unified_rules() -> None:
+    """v2.2：guard.py 与 redaction.py 统一为同一套规则。"""
+    print("\n[unified rules]")
+    from vecrecall.core.guard import find_secrets, redact_secrets
+
+    cases = {
+        "inline credential in prose": ("数据库 password=abc123xyz 别外传", "CREDENTIAL"),
+        "inline secret with colon": ("连接 redis 用 secret: hunter2hunter", "CREDENTIAL"),
+        "quoted inline token": ('调用时传 auth_token="abcd1234efgh" 即可', "CREDENTIAL"),
+        "short npm token": ("npm_abcdefghijklmnopqrstuvwxyz", "API_KEY"),
+        "loose jwt": ("eyJhbGciOiJIUzI1NiJ9.abcdefghijklmnop.signature123", "AUTH_TOKEN"),
+        "connection string": ("postgres://admin:S3cretPass@db.local:5432/app", "CREDENTIAL"),
+    }
+    for name, (raw, kind) in cases.items():
+        result = redact_memory_payload(raw)
+        test(f"redaction: {name}", f"[REDACTED:{kind}]" in result.text, result.text)
+        test(f"guard agrees: {name}", kind in find_secrets(raw), str(find_secrets(raw)))
+
+    for raw in ["api_key = ${MY_KEY}", "token: $GITHUB_TOKEN", "password = {{ vault.pw }}",
+                "password: <your-password>", "密码应当加密存储", "讨论：password 字段应该加密"]:
+        test(f"no false positive: {raw}", not redact_memory_payload(raw).redacted
+             and not find_secrets(raw), redact_memory_payload(raw).text)
+
+    kept = "数据库 password=abc123xyz 别外传"
+    out = redact_memory_payload(kept).text
+    test("prose around secret kept", out.startswith("数据库 password=") and out.endswith(" 别外传"), out)
+
+    test("guard ignores email", find_secrets("联系 alice@example.com") == [])
+    text, kinds = redact_secrets("联系 alice@example.com，password=abc123xyz")
+    test("redact_secrets keeps email", "alice@example.com" in text, text)
+    test("redact_secrets removes password", "abc123xyz" not in text and kinds == ["CREDENTIAL"], text)
+
+
 def run_all() -> bool:
     test_redaction()
+    test_unified_rules()
     test_governor()
     test_outbox()
     test_engine_integration()

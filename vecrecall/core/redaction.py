@@ -111,6 +111,12 @@ RULES: tuple[RedactionRule, ...] = (
         94,
     ),
     RedactionRule(
+        "AUTH_TOKEN",
+        # 宽松 JWT：header 为 eyJ 开头，payload 不一定是 JSON 编码
+        re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b"),
+        93,
+    ),
+    RedactionRule(
         "COOKIE",
         re.compile(r"(?:^|[\r\n])[ \t]*(?:Set-Cookie|Cookie)\s*:\s*([^\r\n]+)", re.I | re.M),
         92,
@@ -141,6 +147,22 @@ RULES: tuple[RedactionRule, ...] = (
         group=1,
         accept=_is_credential,
     ),
+    # 句中的 key=value / key: value（如「数据库 password=xxx 别外传」）。
+    # 上面的规则只认行首或分隔符后的赋值，中文记忆里凭据常写在句子中间。
+    # 值在空白处截止，避免吞掉后续正文；占位符/模板值仍由 _is_credential 放行。
+    RedactionRule(
+        "CREDENTIAL",
+        re.compile(
+            rf"(?<![A-Za-z0-9_$-])[\"']?{_SENSITIVE_KEY}[\"']?[ \t]*[:=][ \t]*"
+            r"(\[REDACTED:[A-Z_]+\]|\$\{\{[^\r\n]*?\}\}|\{\{[^\r\n]*?\}\}|\$\{[^\}\r\n]+\}|"
+            r"\$[A-Za-z_][A-Za-z0-9_]*|"
+            r"\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;#}\]\)\"'，。；]{4,})",
+            re.I,
+        ),
+        84,
+        group=1,
+        accept=_is_credential,
+    ),
     RedactionRule(
         "CREDENTIAL",
         re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@]*:([^\s/@]+)@"),
@@ -156,7 +178,7 @@ RULES: tuple[RedactionRule, ...] = (
     RedactionRule("API_KEY", re.compile(r"\b(?:(?:sk|rk)_live_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,})\b"), 90),
     RedactionRule("API_KEY", re.compile(r"\bglpat-[A-Za-z0-9_-]{16,}[A-Za-z0-9]\b"), 90),
     RedactionRule("API_KEY", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), 90),
-    RedactionRule("API_KEY", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), 90),
+    RedactionRule("API_KEY", re.compile(r"\bnpm_[A-Za-z0-9]{20,}\b"), 90),
     RedactionRule(
         "EMAIL",
         re.compile(
