@@ -826,7 +826,7 @@ def main():
 
     parser = argparse.ArgumentParser(
         prog="vr",
-        description="VecRecall — 改进版 AI 长期记忆系统",
+        description="VecRecall — 本地优先的 AI 记忆系统（纯向量检索，四层上下文，可选多 Agent 隔离与哈希链审计）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="cmd")
