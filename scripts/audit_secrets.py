@@ -7,7 +7,7 @@
 用法：
     python scripts/audit_secrets.py                 # 扫描 ~/.vecrecall
     python scripts/audit_secrets.py --dir /path     # 指定记忆库
-    python scripts/audit_secrets.py --wing hestiaOS # 只扫某个 wing
+    python scripts/audit_secrets.py --wing my-project # 只扫某个 wing
 
 退出码：0=干净，1=发现疑似凭据，2=找不到记忆库。
 """

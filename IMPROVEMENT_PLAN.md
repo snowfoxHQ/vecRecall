@@ -22,7 +22,7 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补
 | 记忆类型（semantic / episodic / procedural） | **已解决** | `memory_type` 落地；semantic 必进图谱；procedural 按场景标签 + 版本精确匹配；`build_context(memory_types=...)` 类型过滤 |
 | 发现 8：遗忘曲线不影响默认检索 | **部分解决** | `retention_policy=immutable` 的记忆不遗忘、不 prune，始终进 L1；常规记忆的强度仍不参与默认排序 |
 | 哈希链 → 审计 | **部分解决** | 按 `(wing, topic_key)` 分链，单主题证据可独立验证导出；仍不是跨库事务 |
-| 发现 15：benchmark 规模小 | **基本解决** | 新增 LongMemEval 检索评测（`benchmarks/longmemeval.py`）。词法嵌入全量基线：会话级 R_any@5 75.3%、R_any@10 84.9%、R_all@10 61.7%，详见 `benchmarks/results/` |
+| 发现 15：质量体系（基准规模小、无 CI、测试非 pytest） | **部分解决** | 基准部分：新增 LongMemEval 检索评测（`benchmarks/longmemeval.py`），指标含 Recall / nDCG / MRR / 延迟。词法嵌入全量基线：会话级 R_any@5 75.3%、R_any@10 84.9%、R_all@10 61.7%，详见 `benchmarks/results/`。**仍缺**：CI、pytest 化、置信区间 |
 | 发现 16：公开文档承诺需校准 | **已解决** | README 召回率改用 LongMemEval 数字，内置评测标注为冒烟测试 |
 | 可扩展性 | **新增能力** | `core/hooks.py`：`before_write` / `after_write` / `recall_filter` / `on_delete`，支持 entry point 插件 |
 | 代码结构 | **改善** | `engine.py` 拆为 models / vectors / embeddings / storage / engine，旧导入保持兼容 |
@@ -34,7 +34,7 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补
 3. **召回上下文过大（未处理）**：整段会话存为一条记忆时，top-5 结果约 13,900 token，远超四层栈「每次几百 token」的设计。需要更细的写入粒度或会话内片段检索。
 4. **偏好类题目召回低（未处理）**：LongMemEval 的 single-session-preference 只有 26.7%，词法嵌入无法匹配语义相近、用词不同的表述，待语义嵌入与混合检索验证。
 
-**仍开放**：发现 1（加密覆盖范围）、3（删除非级联）、4（跨存储部分成功）、5/6/7（索引 fingerprint、SQLite 向量全库扫描、hybrid 无 BM25）、11/12/13（REST body 限制、密钥生命周期）、14（CI 缺失、测试非 pytest）、immutable 记忆无限增长需冷存储归档。
+**仍开放**：发现 1（加密覆盖范围）、3（删除非级联）、4（跨存储部分成功）、5/6/7（索引 fingerprint、SQLite 向量全库扫描、hybrid 无 BM25）、11/12/13（REST 认证收紧、请求体校验、密钥生命周期）、14（MCP / REST / CLI 能力入口不一致）、15 中的 CI 与 pytest 化、immutable 记忆无限增长需冷存储归档。
 
 回归：test_core 257/257、test_blockchain 72/72、test_governance 58/58、test_recall_policy 19/19、test_repo_map 14/14。
 
