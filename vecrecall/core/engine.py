@@ -1,5 +1,5 @@
 """
-VecRecall — 改进版核心引擎
+VecRecall — 记忆运行时核心引擎
 
 关键设计原则：
   检索路径  → 纯向量语义，不经过任何结构过滤
@@ -40,7 +40,8 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from vecrecall.core.extractor import (
-    Extraction, MemoryExtractor, heuristic_importance, heuristic_summary,
+    Extraction, MemoryExtractor, HeuristicExtractor,
+    heuristic_importance, heuristic_summary,
 )
 from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
@@ -71,6 +72,10 @@ def memory_to_dict(m, full: bool = False) -> dict:
         "timestamp": m.timestamp,
         "ui_summary": m.ui_summary,
         "content_preview": m.content[:200],
+        "memory_type": m.memory_type,
+        "visibility": m.visibility,
+        "retention_policy": m.retention_policy,
+        "topic_key": m.topic_key,
     }
     if full:
         d["content"] = m.content
@@ -95,11 +100,23 @@ class Memory:
     importance: float = 0.5     # 0-1，由 LLM 或启发式评分
     ui_summary: str = ""        # AAAK 压缩摘要，仅供 UI 展示
     metadata: dict = field(default_factory=dict)
+    # ── 语义类型维度（与 L0-L3 加载策略维度正交）──
+    memory_type: str = "episodic"       # episodic / semantic / procedural
+    # ── 双层隔离 ──
+    visibility: str = "private"         # private / shared
+    owner: str = ""                     # 写入者标识（agent id / user id）
+    # ── 留存策略 ──
+    retention_policy: str = "decay"     # decay（艾宾浩斯衰减）/ immutable（豁免）
+    # ── 分链键 ──
+    topic_key: str = ""                 # 哈希链分链键（如 contract:<id>），空=默认链
 
     @classmethod
     def create(cls, wing: str, topic: str, content: str,
                session_id: str = "", importance: float = 0.5,
-               ui_summary: str = "", metadata: dict | None = None) -> "Memory":
+               ui_summary: str = "", metadata: dict | None = None,
+               memory_type: str = "episodic", visibility: str = "private",
+               owner: str = "", retention_policy: str = "decay",
+               topic_key: str = "") -> "Memory":
         return cls(
             id=str(uuid.uuid4()),
             wing=wing,
@@ -110,6 +127,11 @@ class Memory:
             importance=importance,
             ui_summary=ui_summary,
             metadata=metadata or {},
+            memory_type=memory_type,
+            visibility=visibility,
+            owner=owner,
+            retention_policy=retention_policy,
+            topic_key=topic_key,
         )
 
 
@@ -564,7 +586,31 @@ class KnowledgeGraph:
         );
         CREATE INDEX IF NOT EXISTS idx_links_src ON cross_links(source_id);
         """)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self):
+        """老库无痛升级：为 memories 表补齐新字段列（存在即跳过）。"""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(memories)")}
+        migrations = [
+            ("memory_type", "TEXT DEFAULT 'episodic'"),
+            ("visibility", "TEXT DEFAULT 'private'"),
+            ("owner", "TEXT DEFAULT ''"),
+            ("retention_policy", "TEXT DEFAULT 'decay'"),
+            ("topic_key", "TEXT DEFAULT ''"),
+        ]
+        for col, ddl in migrations:
+            if col not in cols:
+                self._conn.execute(f"ALTER TABLE memories ADD COLUMN {col} {ddl}")
+        # 阶段 C/B/F 检索过滤要用的索引
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memory_type ON memories(memory_type)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_retention ON memories(retention_policy)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_visibility ON memories(visibility)")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_topic_key ON memories(topic_key)")
 
     def save(self, memory: Memory) -> None:
         content, ui_summary = memory.content, memory.ui_summary
@@ -575,11 +621,15 @@ class KnowledgeGraph:
             meta_raw = self._cipher.encrypt(meta_raw)
         self._conn.execute("""
         INSERT OR REPLACE INTO memories
-          (id, wing, topic, content, timestamp, session_id, importance, ui_summary, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, wing, topic, content, timestamp, session_id, importance,
+           ui_summary, metadata, memory_type, visibility, owner,
+           retention_policy, topic_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (memory.id, memory.wing, memory.topic, content,
               memory.timestamp, memory.session_id, memory.importance,
-              ui_summary, meta_raw))
+              ui_summary, meta_raw,
+              memory.memory_type, memory.visibility, memory.owner,
+              memory.retention_policy, memory.topic_key))
         self._conn.commit()
 
     def get(self, memory_id: str) -> Optional[Memory]:
@@ -606,6 +656,38 @@ class KnowledgeGraph:
         else:
             rows = self._conn.execute(
                 "SELECT * FROM memories ORDER BY importance DESC LIMIT ?", (n,)
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def list_by_retention(self, policy: str) -> list[Memory]:
+        """按留存策略取记忆（immutable 等豁免路径专用）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE retention_policy=? "
+            "ORDER BY importance DESC, timestamp DESC", (policy,)
+        ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def list_by_type(self, memory_type: str) -> list[Memory]:
+        """按语义类型取记忆（procedural 精确匹配路径专用）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE memory_type=? "
+            "ORDER BY importance DESC, timestamp DESC", (memory_type,)
+        ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def list_by_topic_key_prefix(self, prefix: str,
+                                 wing: str | None = None) -> list[Memory]:
+        """按分链键前缀取记忆（时间升序，即链写入顺序）。"""
+        if wing:
+            rows = self._conn.execute(
+                "SELECT * FROM memories WHERE wing=? AND topic_key LIKE ? "
+                "ORDER BY timestamp ASC",
+                (wing, prefix + "%"),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM memories WHERE topic_key LIKE ? "
+                "ORDER BY timestamp ASC", (prefix + "%",),
             ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
@@ -710,10 +792,16 @@ class KnowledgeGraph:
             content = self._cipher.decrypt(content)
             ui_summary = self._cipher.decrypt(ui_summary)
             meta_raw = self._cipher.decrypt(meta_raw)
+        # 新列在 migration 之后必然存在；len 防御外部传入的旧结构 row
         return Memory(
             id=row[0], wing=row[1], topic=row[2], content=content,
             timestamp=row[4], session_id=row[5], importance=row[6],
-            ui_summary=ui_summary, metadata=json.loads(meta_raw)
+            ui_summary=ui_summary, metadata=json.loads(meta_raw),
+            memory_type=row[9] if len(row) > 9 else "episodic",
+            visibility=row[10] if len(row) > 10 else "private",
+            owner=(row[11] or "") if len(row) > 11 else "",
+            retention_policy=row[12] if len(row) > 12 else "decay",
+            topic_key=(row[13] or "") if len(row) > 13 else "",
         )
 
     def close(self):
@@ -758,19 +846,23 @@ class VecRecall:
         dedup: bool = True,
         dedup_threshold: float = 0.92,
         encryption_key: str | None = None,
+        owner: str = "",
         redact_payloads: bool = False,
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.wing = wing
         self.identity_prompt = identity_prompt
+        # 双层隔离：本实例的写入者/查看者标识（agent id / user id）。
+        # 空 = 单机模式，不做可见性过滤（保持旧行为）。
+        self.owner = owner
 
         # 认知层：写入时自动抽取结构化信息（None=关闭，保持词法级零依赖）
         self._extractor = extractor
         # 语义去重：相似度 ≥ 阈值时合并到既有记忆（避免重复）
         self.dedup = dedup
         self.dedup_threshold = dedup_threshold
-        # 写入前脱敏（不可逆，默认关闭；与加密互补，加密不阻止写入库）
+        # 写入前脱敏（不可逆，默认关闭；immutable 审计记忆永不脱敏）
         self.redact_payloads = bool(redact_payloads)
 
         # 存储后端：自动检测可用的最佳后端
@@ -814,7 +906,12 @@ class VecRecall:
     def add(self, content: str, topic: str = "general",
             wing: str | None = None, importance: float | None = None,
             session_id: str = "", ui_summary: str = "",
-            metadata: dict | None = None, dedup: bool | None = None) -> Memory:
+            metadata: dict | None = None, dedup: bool | None = None,
+            memory_type: str = "episodic", visibility: str = "private",
+            owner: str = "", retention_policy: str = "decay",
+            scenario_tags: list[str] | None = None,
+            policy_version: str | None = None,
+            topic_key: str = "") -> Memory:
         """
         存入一条记忆。
 
@@ -823,11 +920,17 @@ class VecRecall:
         - ui_summary（AAAK）只写入 KG，不进入向量
         - 配置了 extractor 时，自动抽取 topic/importance/摘要/实体/关系
         - 语义去重：相似度 ≥ dedup_threshold 时合并到既有记忆（occurrences+1）
+        - memory_type: episodic / semantic / procedural
+          · semantic 强制走时序知识图谱（无 extractor 时启发式兜底）
+          · procedural 走「场景标签 + 版本」精确匹配（query_procedural）
+        - visibility + owner: 双层隔离（private 仅 owner 可见，shared 同 wing 可见）
+        - retention_policy: decay（默认衰减）/ immutable（豁免去重与遗忘）
+        - scenario_tags / policy_version: procedural 专用（写入 metadata）
         """
         w = wing or self.wing
 
         redaction_counts: dict[str, int] = {}
-        if self.redact_payloads:
+        if self.redact_payloads and retention_policy != "immutable":
             from vecrecall.core.redaction import (
                 has_meaningful_payload,
                 redact_memory_payload,
@@ -844,6 +947,10 @@ class VecRecall:
         ext: Extraction | None = None
         if self._extractor is not None:
             ext = self._extractor.extract(content)
+        elif memory_type == "semantic":
+            # semantic 记忆强制走时序图谱：即使未配置 extractor，
+            # 也用启发式抽取兜底，保证实体/关系一定入图。
+            ext = HeuristicExtractor().extract(content)
 
         if ext is not None:
             if topic == "general" and ext.topic != "general":
@@ -859,15 +966,25 @@ class VecRecall:
         meta = dict(metadata or {})
         if redaction_counts:
             meta["redaction_counts"] = redaction_counts
+        if self.redact_payloads and retention_policy == "immutable":
+            meta["redaction_skipped"] = "immutable"
         if ext is not None:
             if ext.entities:
                 meta.setdefault("entities", ext.entities)
             if ext.relations:
                 meta.setdefault("relations", ext.relations)
+        # procedural 记忆：场景标签 + 策略版本写入 metadata，供精确匹配
+        if memory_type == "procedural":
+            if scenario_tags:
+                meta["scenario_tags"] = list(scenario_tags)
+            if policy_version:
+                meta["policy_version"] = policy_version
 
         # 语义去重合并（相似度过高时不再新增）
+        # 豁免：retention_policy=immutable（审计记忆）语义再相似也各存各的，
+        # 两笔金额差一分的审批决策是不同的审计事实，绝不能合并 occurrences。
         do_dedup = self.dedup if dedup is None else dedup
-        if do_dedup:
+        if do_dedup and retention_policy != "immutable":
             existing = self._dedup_candidate(content)
             if existing is not None:
                 existing.importance = max(existing.importance, importance)
@@ -881,6 +998,9 @@ class VecRecall:
             wing=w, topic=topic, content=content,
             session_id=session_id, importance=importance,
             ui_summary=ui_summary, metadata=meta,
+            memory_type=memory_type, visibility=visibility,
+            owner=owner, retention_policy=retention_policy,
+            topic_key=topic_key,
         )
 
         # 1. 向量索引：只索引原文，不含结构信息（这是关键改动）
@@ -893,7 +1013,7 @@ class VecRecall:
         # 3. 时序知识图谱：实体/关系/状态演化
         self._ingest_graph(ext, mem.id, mem.timestamp)
 
-        # 4. 可选：哈希链区块（防篡改审计）
+        # 4. 可选：哈希链区块（防篡改审计；topic_key 非空时入独立子链）
         if self._chain is not None:
             from vecrecall.blockchain import extract_keywords
             self._chain.new_block(
@@ -902,6 +1022,7 @@ class VecRecall:
                 session_id=mem.session_id,
                 trigger="memory",
                 keywords=extract_keywords(content),
+                topic_key=topic_key,
             )
 
         return mem
@@ -922,15 +1043,20 @@ class VecRecall:
         load_l2: bool = True,
         load_l3: bool = False,
         hybrid: bool = False,
+        memory_types: list[str] | None = None,
+        viewer: str | None = None,
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
 
         L0: 固定身份层
-        L1: 全库按 importance 排序 top-15（不按 wing 过滤）
+        L1: 全库按 importance 排序 top-15（不按 wing 过滤）；
+            immutable（审计）记忆无条件并入，不受 top-K 挤占
         L2: 当前查询语义触发，阈值 ≥ 0.55
         L3: 仅显式请求时触发，全量语义检索
         hybrid: True 时 L2/L3 分数 = 0.6·相似度 + 0.25·重要性 + 0.15·时间新鲜度
+        memory_types: 声明本次加载的记忆语义类型（episodic/semantic/procedural），
+            与 L0-L3 加载策略维度正交；None 表示不过滤（全部类型）。
         """
 
         # L0
@@ -938,6 +1064,14 @@ class VecRecall:
 
         # L1：按 importance 取 top-K，不做向量过滤（保留原版设计）
         top_mems = self._kg.top_by_importance(wing=None, n=self.L1_TOP_K)
+        # 召回豁免：immutable（审计）记忆无条件并入 L1，
+        # 不受 top-K 挤占和强度/重要性阈值限制。
+        seen_ids = {m.id for m in top_mems}
+        immutable_extra = [m for m in self._kg.list_by_retention("immutable")
+                           if m.id not in seen_ids]
+        if immutable_extra:
+            top_mems = sorted(top_mems + immutable_extra,
+                              key=lambda m: m.importance, reverse=True)
         l1_results = [
             RetrievalResult(memory=m, score=m.importance, layer="L1")
             for m in top_mems
@@ -952,6 +1086,23 @@ class VecRecall:
         l3_results: list[RetrievalResult] = []
         if load_l3 and current_query.strip():
             l3_results = self._deep_search(current_query, self.L3_TOP_K, hybrid=hybrid)
+
+        # 类型过滤：一处实现，L1/L2/L3 三层统一生效
+        if memory_types is not None:
+            allowed = set(memory_types)
+            l1_results = [r for r in l1_results if r.memory.memory_type in allowed]
+            l2_results = [r for r in l2_results if r.memory.memory_type in allowed]
+            l3_results = [r for r in l3_results if r.memory.memory_type in allowed]
+
+        # 可见性过滤（双层隔离）：private 仅 owner 可见，shared 同 wing 全员可见
+        viewer = viewer if viewer is not None else self.owner
+        if viewer:
+            l1_results = [r for r in l1_results
+                          if self._visible_to(r.memory, viewer)]
+            l2_results = [r for r in l2_results
+                          if self._visible_to(r.memory, viewer)]
+            l3_results = [r for r in l3_results
+                          if self._visible_to(r.memory, viewer)]
 
         # token 估算（中英混合修正：中文 ≈ 0.7 token/字）
         def count(results):
@@ -1007,9 +1158,12 @@ class VecRecall:
         results = []
         for mid, score in scores.items():
             if mid in mem_map:
-                s = self._hybrid_score(score, mem_map[mid]) if hybrid else score
+                m = mem_map[mid]
+                if self.owner and not self._visible_to(m, self.owner):
+                    continue  # 可见性过滤：private 记忆不泄露给非 owner
+                s = self._hybrid_score(score, m) if hybrid else score
                 results.append(RetrievalResult(
-                    memory=mem_map[mid], score=s, layer="L3"
+                    memory=m, score=s, layer="L3"
                 ))
 
         results.sort(key=lambda x: x.score, reverse=True)
@@ -1021,6 +1175,20 @@ class VecRecall:
         recency = 0.5 ** (age_days / self.RECENCY_HALF_LIFE_DAYS)
         return 0.6 * sim + 0.25 * mem.importance + 0.15 * recency
 
+    def _visible_to(self, m: Memory, viewer: str | None) -> bool:
+        """
+        双层隔离判定：
+        - shared：同 wing 全员可见
+        - private：仅 owner 匹配可见
+        - owner 为空的记忆（老数据/未声明）：视为公开，保持旧行为
+        - viewer 为空（实例未配置 owner 的单机模式）：不过滤
+        """
+        if m.visibility == "shared" or not m.owner:
+            return True
+        if not viewer:
+            return True
+        return m.owner == viewer
+
     # ── 搜索 ──────────────────────────────────
 
     def search(self, query: str, n: int = 10, min_score: float = 0.0,
@@ -1028,7 +1196,7 @@ class VecRecall:
                acceptance_query: str | None = None) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
 
-        acceptance_query 给定时，对每条结果附加三项验收结果（同边界/同行为/
+        acceptance_query 给定时，对每条结果附加三项验收（同边界/同行为/
         可执行），不改变召回和排序，调用方自行决定是否采信。
         """
         results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid)
@@ -1038,6 +1206,46 @@ class VecRecall:
                 verdict = evaluate_memory(result.memory.content, acceptance_query)
                 result.acceptance = verdict.as_dict()
         return results
+
+    def query_by_topic_key(self, prefix: str,
+                           wing: str | None = None) -> list[Memory]:
+        """
+        按分链键前缀查询记忆（通用原语）。
+
+        例：query_by_topic_key("contract:C-001") 返回该主题关联的全部记忆，
+        配合 verify_integrity(topic_key=...) 即可独立导出和验证一条审计链。
+        """
+        out: list[Memory] = []
+        for m in self._kg.list_by_topic_key_prefix(prefix, wing=wing):
+            if self.owner and not self._visible_to(m, self.owner):
+                continue
+            out.append(m)
+        return out
+
+    def query_procedural(self, scenario_tags: list[str] | None = None,
+                         version: str | None = None) -> list[Memory]:
+        """
+        procedural 记忆精确匹配：按「场景标签 + 策略版本」检索，不走语义近似。
+
+        - strategy/规则/阈值类记忆是可版本化的策略表，检索时必须精确命中，
+          向量相似度召回对它们是错误工具（差一分的阈值不是同一个策略）。
+        - scenario_tags: 请求的标签须全部包含在记忆的标签里（子集匹配）；
+          None 表示不按标签过滤。
+        - version: 精确匹配 policy_version；None 表示任意版本。
+        """
+        out: list[Memory] = []
+        for m in self._kg.list_by_type("procedural"):
+            if self.owner and not self._visible_to(m, self.owner):
+                continue  # 可见性过滤
+            if scenario_tags:
+                mem_tags = set(m.metadata.get("scenario_tags") or [])
+                if not set(scenario_tags) <= mem_tags:
+                    continue
+            if version is not None and \
+                    m.metadata.get("policy_version") != version:
+                continue
+            out.append(m)
+        return out
 
     # ── 遗忘曲线 ──────────────────────────────
 
@@ -1053,7 +1261,8 @@ class VecRecall:
         """列出强度已跌破阈值的「已遗忘」记忆（按强度升序，最遗忘的在前）。"""
         now = time.time()
         out = [m for m in self._kg.iter_all(wing=wing)
-               if self._forgetting.is_forgotten(m, threshold, now)]
+               if m.retention_policy != "immutable"
+               and self._forgetting.is_forgotten(m, threshold, now)]
         out.sort(key=lambda m: self._forgetting.strength(m, now))
         return out
 
@@ -1080,6 +1289,9 @@ class VecRecall:
         """
         groups: dict[str, list[Memory]] = {}
         for m in self._kg.iter_all(wing=wing):
+            # 豁免：immutable（审计记忆）不参与蒸馏——原始细节是不可替代的证据
+            if m.retention_policy == "immutable":
+                continue
             if m.metadata.get("distilled"):
                 continue
             if topic and m.topic != topic:
@@ -1203,8 +1415,42 @@ class VecRecall:
 
     def link(self, source_id: str, target_id: str,
              link_type: str = "related", weight: float = 1.0) -> None:
-        """手动建立跨 wing 关联（可选）"""
+        """手动建立跨 wing 关联（可选）。跨 wing 仅对 shared 记忆开放。"""
+        src, dst = self._kg.get(source_id), self._kg.get(target_id)
+        if src is None or dst is None:
+            raise ValueError("link 的源/目标记忆不存在")
+        if src.wing != dst.wing and \
+                (src.visibility != "shared" or dst.visibility != "shared"):
+            raise ValueError(
+                "跨 wing 关联仅对 visibility=shared 的记忆开放")
         self._kg.add_link(source_id, target_id, link_type, weight)
+
+    def update_visibility(self, memory_id: str, visibility: str) -> Memory:
+        """原子操作：变更记忆可见性（private / shared）。"""
+        if visibility not in ("private", "shared"):
+            raise ValueError(f"非法 visibility: {visibility}（仅 private/shared）")
+        m = self._kg.get(memory_id)
+        if not m:
+            raise ValueError(f"记忆不存在: {memory_id}")
+        m.visibility = visibility
+        self._kg.save(m)
+        return m
+
+    def update_retention_policy(self, memory_id: str, policy: str) -> Memory:
+        """
+        原子操作：变更留存策略（decay / immutable）。
+
+        供外部编排（如契约状态机在状态迁移时调用）：
+        记忆从活跃转为不可变时调用 update_retention_policy(id, "immutable")。
+        """
+        if policy not in ("decay", "immutable"):
+            raise ValueError(f"非法 retention_policy: {policy}（仅 decay/immutable）")
+        m = self._kg.get(memory_id)
+        if not m:
+            raise ValueError(f"记忆不存在: {memory_id}")
+        m.retention_policy = policy
+        self._kg.save(m)
+        return m
 
     # ── 生命周期管理 ──────────────────────────
 
@@ -1263,6 +1509,10 @@ class VecRecall:
         now = time.time()
         victims: list[Memory] = []
         for m in self._kg.iter_all(wing=wing):
+            # 豁免：immutable（审计记忆）永不被 prune——审批决策、证据链
+            # 不能因为「很久没复习」或「importance 低」被清理掉。
+            if m.retention_policy == "immutable":
+                continue
             if use_forgetting:
                 if self._forgetting.is_forgotten(m, strength_threshold, now):
                     victims.append(m)
@@ -1294,15 +1544,19 @@ class VecRecall:
 
     # ── 防篡改验证（可选区块链）──────────────
 
-    def verify_integrity(self, wing: str | None = None) -> dict:
-        """验证哈希链完整性，检测记忆原文是否被篡改"""
+    def verify_integrity(self, wing: str | None = None,
+                         topic_key: str = "") -> dict:
+        """
+        验证哈希链完整性，检测记忆原文是否被篡改。
+        topic_key 非空时只验证 (wing, topic_key) 子链（如单个契约的审计链）。
+        """
         if self._chain is None:
             return {"enabled": False,
                     "message": "区块链未启用（构造时 use_blockchain=True 开启）"}
         wings = [wing] if wing else (self._kg.list_wings() or [self.wing])
         results = {}
         for w in wings:
-            ok, msg = self._chain.verify_chain(w)
+            ok, msg = self._chain.verify_chain(w, topic_key)
             results[w] = {"valid": ok, "message": msg}
         return {"enabled": True, "wings": results}
 

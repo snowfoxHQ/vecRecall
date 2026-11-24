@@ -176,6 +176,19 @@ def test_engine_integration() -> None:
             test("redaction off by default", False)
         engine.close()
 
+    with tempfile.TemporaryDirectory() as tmp:
+        engine = VecRecall(
+            tmp,
+            embedding_backend=BagOfWordsEmbeddingBackend(),
+            vector_backend=NumpyVectorBackend(),
+            redact_payloads=True,
+        )
+        raw = "token = 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' audit evidence"
+        mem = engine.add(raw, retention_policy="immutable", topic_key="contract:demo")
+        test("immutable audit memory not redacted", mem.content == raw, mem.content)
+        test("immutable skip recorded", mem.metadata.get("redaction_skipped") == "immutable", str(mem.metadata))
+        engine.close()
+
 
 def run_all() -> bool:
     test_redaction()

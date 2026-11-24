@@ -761,18 +761,6 @@ def cmd_browse(args, cfg):
 
 
 
-def cmd_recall_policy(args, cfg):
-    """检索决策：要不要查、查什么。"""
-    from vecrecall.core.recall_policy import build_query_intent, decide_recall
-    decision = decide_recall(args.query, getattr(args, "context", None))
-    print(f"检索: {'是' if decision.should_recall else '否'}")
-    print(f"理由: {decision.reason}")
-    print(f"信号: {', '.join(decision.signals) or '无'}")
-    print(f"置信度: {decision.confidence:.2f}")
-    if decision.should_recall:
-        print(f"建议查询: {build_query_intent(args.query, getattr(args, 'context', None))}")
-
-
 def cmd_writeback(args, cfg):
     """查看/恢复写回队列。"""
     from vecrecall.core.writeback import SqliteOutbox
@@ -790,6 +778,18 @@ def cmd_writeback(args, cfg):
         print("写回队列: " + (", ".join(f"{k}={v}" for k, v in sorted(stats.items())) or "空"))
     finally:
         outbox.close()
+
+
+def cmd_recall_policy(args, cfg):
+    """检索决策：要不要查、查什么。"""
+    from vecrecall.core.recall_policy import build_query_intent, decide_recall
+    decision = decide_recall(args.query, getattr(args, "context", None))
+    print(f"检索: {'是' if decision.should_recall else '否'}")
+    print(f"理由: {decision.reason}")
+    print(f"信号: {', '.join(decision.signals) or '无'}")
+    print(f"置信度: {decision.confidence:.2f}")
+    if decision.should_recall:
+        print(f"建议查询: {build_query_intent(args.query, getattr(args, 'context', None))}")
 
 
 def cmd_repo_map(args, cfg):
@@ -1025,15 +1025,15 @@ def main():
     p_gs.add_argument("--n", type=int, default=10)
     p_gs.add_argument("--hops", type=int, default=2)
 
-    p_rp = sub.add_parser("recall-policy", help="判断当前任务是否需要检索历史记忆")
-    p_rp.add_argument("query", help="当前任务/问题")
-    p_rp.add_argument("--context", help="当前可见上下文（用于判断是否已含所需事实）")
-
     p_wb = sub.add_parser("writeback", help="查看/恢复写回队列")
     p_wb.add_argument("writeback_action", nargs="?", default="stats",
                       choices=["stats", "recover"])
     p_wb.add_argument("--timeout", type=float, default=300.0,
                       help="recover 时判定 in_flight 超时的秒数")
+
+    p_rp = sub.add_parser("recall-policy", help="判断当前任务是否需要检索历史记忆")
+    p_rp.add_argument("query", help="当前任务/问题")
+    p_rp.add_argument("--context", help="当前可见上下文（用于判断是否已含所需事实）")
 
     p_rm = sub.add_parser("repo-map", help="仓库知识映射（构建/增量检测/校验）")
     p_rm.add_argument("repo_action", nargs="?", default="build",
@@ -1059,7 +1059,8 @@ def main():
         "graph": cmd_graph, "entity": cmd_entity,
         "decay": cmd_decay, "distill": cmd_distill,
         "graph-search": cmd_graph_search,
-        "recall-policy": cmd_recall_policy, "writeback": cmd_writeback,
+        "writeback": cmd_writeback,
+        "recall-policy": cmd_recall_policy,
         "repo-map": cmd_repo_map,
     }
 

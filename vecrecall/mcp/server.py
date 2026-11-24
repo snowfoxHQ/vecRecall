@@ -501,7 +501,7 @@ class MCPServer:
             _ok(req_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vecrecall", "version": "2.1.0"},
+                "serverInfo": {"name": "vecrecall", "version": "2.2.0"},
             })
         elif method == "tools/list":
             _ok(req_id, {"tools": TOOLS})
@@ -524,6 +524,7 @@ class MCPServer:
 
     def _call(self, name: str, args: dict) -> Any:
         p = self._palace
+
 
         if name == "mp_add":
             m = p.add(**{k: v for k, v in args.items()})
@@ -590,7 +591,7 @@ class MCPServer:
             candidate = args["candidate"]
             try:
                 parsed = json.loads(candidate)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 parsed = candidate
             return evaluate_memory(parsed, args["query"]).as_dict()
 

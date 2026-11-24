@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecrecall"
-version = "2.1.0"
+version = "2.2.0"
 description = "认知记忆系统：检索与组织解耦，纯语义向量检索，四层记忆栈，LLM 认知层"
 readme = "README.md"
 requires-python = ">=3.10"

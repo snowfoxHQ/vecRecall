@@ -1,12 +1,18 @@
-# VecRecall v2.1
+# VecRecall v2.2
 
-[![版本](https://img.shields.io/badge/version-2.1.0-blue)](https://github.com/snowfoxHQ/vecRecall)
+[![版本](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/snowfoxHQ/vecRecall)
 [![许可证](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-brightgreen)](https://python.org)
 
 > 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-认知记忆系统。基于对原版 MemPalace 的设计分析重新构建，v2.0 新增 **LLM 认知层**（写入时自动抽取实体/关系/摘要/话题 + 语义去重合并）、**时序知识图谱**、**遗忘曲线与主动蒸馏**、**多跳向量+图谱混合检索**、**静态加密（at-rest）**、**语义嵌入升级**（subword 增强词法 + 多语言语义模型）。
+认知记忆系统，也可作为多 Agent 的记忆运行时。基于对原版 MemPalace 的设计分析重新构建，v2.0 新增 **LLM 认知层**（写入时自动抽取实体/关系/摘要/话题 + 语义去重合并）、**时序知识图谱**、**遗忘曲线与主动蒸馏**、**多跳向量+图谱混合检索**、**静态加密（at-rest）**、**语义嵌入升级**（subword 增强词法 + 多语言语义模型）。
+
+**v2.2 新增运行时原语**（全部可选、有默认值，单 Agent 用法不变）：
+
+- **类型化记忆**：`memory_type` = episodic / semantic / procedural。semantic 必进时序图谱；procedural（规则、阈值、策略）按「场景标签 + 版本」精确匹配，不走向量模糊召回。
+- **隔离**：`wing` × `visibility`（private/shared）× `owner`。private 仅写入者可见，shared 同 wing 可见，跨 wing 关联只对 shared 开放。
+- **不可变记忆与分链**：`retention_policy="immutable"` 的记忆不去重、不遗忘、不被 prune、不参与蒸馏，始终进入 L1；哈希链按 `topic_key` 分链，单个主题的证据可独立验证。
 
 ## 与原版的核心区别
 
@@ -59,7 +65,37 @@ with VecRecall(base_dir="~/.vr", wing="my-project") as palace:
     print(ctx.l0_identity)        # L0: ~50 tokens
     print(len(ctx.l1_key_moments))  # L1: top-15 关键时刻
     print(len(ctx.l2_topic_context))  # L2: 语义触发的相关上下文
+
+    # 类型化写入（v2.2）
+    palace.add("供应商 Acme 进入合格名录", memory_type="semantic")
+    palace.add("付款超 5 万需双人复核", memory_type="procedural",
+               scenario_tags=["payment", "gatekeeping"], policy_version="v1")
+    palace.query_procedural(scenario_tags=["gatekeeping"], version="v1")
+
+    # 不可变记忆：不去重、不遗忘、不被 prune，始终可召回；按 topic_key 独立成链
+    palace.add("发布决策：v2.2 冻结检索接口", retention_policy="immutable",
+               topic_key="release:v2.2")
 ```
+
+### 多 Agent 示例（v2.2）
+
+```python
+# 两个 Agent 各自持有实例，共享同一个数据目录
+agent_a = VecRecall(base_dir="~/.vr", wing="team", owner="agent-a")
+agent_b = VecRecall(base_dir="~/.vr", wing="team", owner="agent-b")
+
+agent_a.add("A 的私有笔记", owner="agent-a")                # private：仅 A 可见
+mem = agent_a.add("团队共识：代码评审需两人通过", visibility="shared",
+                  memory_type="procedural")                 # shared：同 wing 可见
+
+agent_b.search("私有笔记")    # → 看不到 A 的 private 记忆
+
+# 原子变更（供外部编排调用）
+agent_a.update_visibility(mem.id, "shared")
+agent_a.update_retention_policy(mem.id, "immutable")
+```
+
+> 授权（谁能写 shared）由调用方或接口层决定，核心只负责按 owner / visibility 过滤。owner 为空的老数据视为公开；实例未配置 owner 时不过滤，单机行为与 v2.1 一致。
 
 ### CLI
 
@@ -276,7 +312,7 @@ VR_ENCRYPTION_KEY="..." vr add "..."  # 环境变量运行时覆盖（对所有�
 
 ---
 
-### 写入治理、检索决策与仓库知识映射（v2.1）
+### 写入治理、检索决策与仓库知识映射
 
 v2.1 增加四组可独立启用的治理机制，默认不改变既有行为：
 
@@ -387,10 +423,10 @@ VecRecall 对接口访问提供多层守护：
 | **跨域防护** | 默认不发送 CORS 头，浏览器网页无法跨域盗读；需 `--cors-origin` 显式放行指定 Origin |
 | **文件路径隔离** | MCP 的 `mp_import_json` / `mp_export_wing` 将路径限制在数据目录内，防止任意文件读写（含 prompt 注入诱导） |
 | **SQL 注入防护** | 全部查询参数化（`?` 占位符），不拼接用户输入 |
-| **防篡改（完整性）** | `--chain` 哈希链：每次写入生成区块，`mp_verify` / `vr verify` 检测原文篡改 |
+| **防篡改（完整性）** | `--chain` 哈希链：每次写入生成区块，按 `(wing, topic_key)` 分链，`mp_verify` / `vr verify` 检测原文篡改 |
 | **密钥不落盘** | 远程嵌入 API Key 只从环境变量读取，不写入 config.json |
 
-**注意**：记忆原文以明文存储（无 at-rest 加密），敏感数据请配合磁盘加密或自托管部署。
+**注意**：默认不加密，记忆原文以明文写入 `knowledge.db`。存放敏感内容时请启用静态加密（`vr init --encrypt` 或 `encryption_key`，见上文），或开启写入前脱敏（`redact_payloads=True`）。可用 `python scripts/audit_secrets.py` 只读扫描已入库记忆中是否混入凭据。
 
 ---
 
@@ -400,7 +436,7 @@ VecRecall 对接口访问提供多层守护：
 
 ```
 L0  身份层          ~50 tokens   每次必加载，固定
-L1  关键时刻        ~600 tokens  按 importance 排序的 top-15，不按 wing 过滤
+L1  关键时刻        ~600 tokens  按 importance 排序的 top-15，不按 wing 过滤；immutable 记忆始终纳入
 L2  语义触发上下文  ~300 tokens  当前对话与历史记忆相似度 ≥ 0.55 时加载
 L3  深度检索        按需触发     全量语义检索，直接命中向量库
 ```
@@ -412,7 +448,7 @@ L2 的改动是关键：原版用 Room 名称匹配触发，VecRecall 改为语�
 
 ## MCP 工具列表（共 34 个）
 
-**检索决策（v2.1）**
+**检索决策**
 - `mp_recall_policy` — 判断当前任务是否值得检索，并给出规范化查询意图
 - `mp_accept_memory` — 三项验收（同边界 / 同行为 / 可执行）；`mp_search` 的 `acceptance_query` 只附加验收、不改排序
 
@@ -442,7 +478,7 @@ L2 的改动是关键：原版用 Room 名称匹配触发，VecRecall 改为语�
 - `mp_get_memory` — 按 ID 获取记忆
 
 **知识图谱**
-- `mp_link` — 建立跨 wing 关联
+- `mp_link` — 建立跨 wing 关联（v2.2 起仅对双方均为 shared 的记忆开放）
 
 **Agent 日记**
 - `mp_diary_write` — 写入 Agent 日记
@@ -522,11 +558,32 @@ palace = VecRecall(base_dir="~/.vr", embedding_backend=emb)
 
 ```bash
 python tests/test_core.py
-# 结果: 158/158 通过
-
 python tests/test_blockchain.py
-# 结果: 72/72 通过
+python tests/test_governance.py
+python tests/test_recall_policy.py
+python tests/test_repo_map.py
 ```
+
+`test_core.py` 含核心边界守护：核心源码不得出现场景 schema（如 `contract_id`），也不得引用 `vecrecall.adapters`。
+
+---
+
+## v2.2 升级说明（运行时原语）
+
+v2.2 把类型化、隔离、不可变与分链能力并入公开核心。所有新参数都有默认值，老代码无需改动，老库打开时自动 migration。
+
+| 升级项 | 说明 |
+|---|---|
+| **类型化记忆** | 新增 `memory_type`（episodic / semantic / procedural），与 L0–L3 加载策略正交。`semantic` 必进时序图谱（无 extractor 时启发式兜底）；`procedural` 用 `query_procedural(scenario_tags, version)` 精确匹配 |
+| **类型过滤** | `build_context(memory_types=[...])` 一处过滤，L1/L2/L3 同时生效 |
+| **隔离** | 新增 `visibility`（private/shared）与 `owner`，与 wing 组成三元组；`update_visibility()` 原子操作 |
+| **不可变记忆** | 新增 `retention_policy`（decay 默认 / immutable）。immutable 不去重、不遗忘、不 prune、不蒸馏、不脱敏，始终进入 L1；`update_retention_policy()` 原子操作 |
+| **哈希链分链** | `blocks` 表新增 `topic_key`，按 `(wing, topic_key)` 建链与验证；默认链（`topic_key=""`）向后兼容 |
+| **按主题查询** | `query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)`，可单独验证一条主题链 |
+| **跨 wing 关联收紧** | `mp_link` 跨 wing 仅对双方 shared 的记忆开放 |
+| **核心边界** | 核心只接受 `memory_type` / `visibility` / `owner` / `retention_policy` / `topic_key` 等通用原语，任何场景 schema 不进核心，由源码断言测试守护 |
+
+> 已知边界：immutable 记忆只增不减，长期运行需要配套冷存储归档（未实现）。
 
 ---
 

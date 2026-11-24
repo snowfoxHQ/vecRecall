@@ -1,10 +1,16 @@
 [中文](README.md) | **English**
 
-# VecRecall v2.1
+# VecRecall v2.2
 
 > Full release history: [CHANGELOG.md](CHANGELOG.md).
 
-A cognitive memory system. Rebuilt from a design analysis of the original MemPalace, v2.0 adds an **LLM cognitive layer** (automatic entity / relation / summary / topic extraction on write + semantic dedup & merge), a **temporal knowledge graph**, **forgetting curves & active distillation**, **multi-hop vector+graph hybrid retrieval**, **at-rest encryption**, and a **semantic embedding upgrade** (subword-augmented lexical + multilingual semantic model).
+A cognitive memory system that also works as a memory runtime for multi-agent setups. Rebuilt from a design analysis of the original MemPalace, v2.0 adds an **LLM cognitive layer** (automatic entity / relation / summary / topic extraction on write + semantic dedup & merge), a **temporal knowledge graph**, **forgetting curves & active distillation**, **multi-hop vector+graph hybrid retrieval**, **at-rest encryption**, and a **semantic embedding upgrade** (subword-augmented lexical + multilingual semantic model).
+
+**v2.2 adds runtime primitives** (all optional with defaults; single-agent usage is unchanged):
+
+- **Typed memory**: `memory_type` = episodic / semantic / procedural. Semantic memories always enter the temporal graph; procedural memories (rules, thresholds, policies) are matched exactly by scenario tags + version, not by fuzzy vector recall.
+- **Isolation**: `wing` × `visibility` (private/shared) × `owner`. Private memories are visible only to their writer, shared ones to the whole wing; cross-wing links are allowed only between shared memories.
+- **Immutable memory & per-key chains**: memories with `retention_policy="immutable"` skip dedup, forgetting, pruning and distillation and are always loaded into L1; the hash chain is split by `topic_key`, so one topic's evidence can be verified on its own.
 
 ## Key Differences from the Original
 
@@ -57,7 +63,37 @@ with VecRecall(base_dir="~/.vr", wing="my-project") as palace:
     print(ctx.l0_identity)            # L0: ~50 tokens
     print(len(ctx.l1_key_moments))    # L1: top-15 key moments
     print(len(ctx.l2_topic_context))  # L2: semantically triggered context
+
+    # Typed writes (v2.2)
+    palace.add("Vendor Acme added to the approved list", memory_type="semantic")
+    palace.add("Payments over 50k need two approvers", memory_type="procedural",
+               scenario_tags=["payment", "gatekeeping"], policy_version="v1")
+    palace.query_procedural(scenario_tags=["gatekeeping"], version="v1")
+
+    # Immutable memory: no dedup, no forgetting, never pruned; own chain per topic_key
+    palace.add("Release decision: freeze the retrieval API for v2.2",
+               retention_policy="immutable", topic_key="release:v2.2")
 ```
+
+### Multi-Agent Example (v2.2)
+
+```python
+# Two agents, each with its own instance, sharing one data directory
+agent_a = VecRecall(base_dir="~/.vr", wing="team", owner="agent-a")
+agent_b = VecRecall(base_dir="~/.vr", wing="team", owner="agent-b")
+
+agent_a.add("A's private note", owner="agent-a")                # private: A only
+mem = agent_a.add("Team rule: code review needs two approvals",
+                  visibility="shared", memory_type="procedural")  # shared: whole wing
+
+agent_b.search("private note")   # -> A's private memory is not visible
+
+# Atomic changes (for external orchestration)
+agent_a.update_visibility(mem.id, "shared")
+agent_a.update_retention_policy(mem.id, "immutable")
+```
+
+> Authorization (who may write shared memories) is up to the caller or the interface layer; the core only filters by owner / visibility. Legacy rows with an empty owner are treated as public, and an instance without an owner applies no filter, so single-machine behavior matches v2.1.
 
 ### CLI
 
@@ -274,7 +310,7 @@ VR_ENCRYPTION_KEY="..." vr add "..."  # Runtime override via env var (applies to
 
 ---
 
-### Write Governance, Retrieval Decisions, and Repository Map (v2.1)
+### Write Governance, Retrieval Decisions, and Repository Map
 
 v2.1 adds four independently opt-in mechanisms; default behavior is unchanged:
 
@@ -385,10 +421,10 @@ VecRecall provides multiple layers of protection for interface access:
 | **CORS hardening** | No CORS headers sent by default — browser pages cannot cross-origin read; use `--cors-origin` to explicitly allow a specific Origin |
 | **File path isolation** | MCP's `mp_import_json` / `mp_export_wing` restrict paths to the data directory, preventing arbitrary file read/write (including prompt-injection attempts) |
 | **SQL injection protection** | All queries are parameterized (`?` placeholders), never concatenating user input |
-| **Tamper-proof (integrity)** | `--chain` hash chain: each write generates a block; `mp_verify` / `vr verify` detect content tampering |
+| **Tamper-proof (integrity)** | `--chain` hash chain: each write generates a block, chained per `(wing, topic_key)`; `mp_verify` / `vr verify` detect content tampering |
 | **Key never stored on disk** | The remote embedding API key is read only from environment variables, never written to config.json |
 
-**Note**: memory content is stored in plaintext (no at-rest encryption) unless encryption is enabled; for sensitive data, pair with disk encryption or self-hosting.
+**Note**: encryption is off by default, so memory content is written to `knowledge.db` in plaintext. For sensitive content, enable at-rest encryption (`vr init --encrypt` or `encryption_key`, see above) or pre-write redaction (`redact_payloads=True`). `python scripts/audit_secrets.py` scans stored memories read-only for leaked credentials.
 
 ---
 
@@ -398,7 +434,7 @@ Each AI wake-up loads only 600–900 tokens, instead of stuffing all history int
 
 ```
 L0  Identity layer       ~50 tokens    Loaded every time, fixed
-L1  Key moments          ~600 tokens   Top-15 by importance, no wing filter
+L1  Key moments          ~600 tokens   Top-15 by importance, no wing filter; immutable memories always included
 L2  Semantic context     ~300 tokens   Loaded when similarity to current dialogue ≥ 0.55
 L3  Deep retrieval       On demand     Full semantic search, hits vector store directly
 ```
@@ -410,7 +446,7 @@ The threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `pa
 
 ## MCP Tools (34 total)
 
-**Retrieval decisions (v2.1)**
+**Retrieval decisions**
 - `mp_recall_policy` — decide whether the current task warrants retrieval, with a normalized query intent
 - `mp_accept_memory` — three acceptance checks (same boundary / same behavior / actionable); `mp_search`'s `acceptance_query` attaches verdicts without changing ranking
 
@@ -440,7 +476,7 @@ The threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `pa
 - `mp_get_memory` — Get memory by ID
 
 **Knowledge graph**
-- `mp_link` — Create cross-wing association
+- `mp_link` — Create cross-wing association (since v2.2, only between memories that are both shared)
 
 **Agent diary**
 - `mp_diary_write` — Write agent diary entry
@@ -520,11 +556,32 @@ After changing the embedding backend, run `vr reindex` (or `mp_reindex`) once to
 
 ```bash
 python tests/test_core.py
-# Result: 158/158 passed
-
 python tests/test_blockchain.py
-# Result: 72/72 passed
+python tests/test_governance.py
+python tests/test_recall_policy.py
+python tests/test_repo_map.py
 ```
+
+`test_core.py` includes a core-boundary guard: core sources must not contain scenario schemas (such as `contract_id`) or import `vecrecall.adapters`.
+
+---
+
+## v2.2 Upgrade Notes (Runtime Primitives)
+
+v2.2 brings typed, isolated, immutable and per-key-chained memory into the public core. Every new parameter has a default, existing code needs no changes, and old databases migrate automatically on open.
+
+| Change | Details |
+|---|---|
+| **Typed memory** | New `memory_type` (episodic / semantic / procedural), orthogonal to L0–L3 loading. `semantic` always enters the temporal graph (heuristic fallback without an extractor); `procedural` is matched exactly with `query_procedural(scenario_tags, version)` |
+| **Type filtering** | `build_context(memory_types=[...])` filters in one place for L1/L2/L3 |
+| **Isolation** | New `visibility` (private/shared) and `owner`, forming a triple with wing; atomic `update_visibility()` |
+| **Immutable memory** | New `retention_policy` (decay default / immutable). Immutable memories skip dedup, forgetting, pruning, distillation and redaction, and are always in L1; atomic `update_retention_policy()` |
+| **Per-key hash chains** | `blocks` gains a `topic_key` column; chains are built and verified per `(wing, topic_key)`; the default chain (`topic_key=""`) stays backward compatible |
+| **Topic queries** | `query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)` verify a single topic chain |
+| **Tighter cross-wing links** | `mp_link` across wings only for memories that are shared on both sides |
+| **Core boundary** | The core accepts only generic primitives (`memory_type` / `visibility` / `owner` / `retention_policy` / `topic_key`); scenario schemas stay out, enforced by a source-assertion test |
+
+> Known limit: immutable memories only grow; long-running deployments need cold-storage archiving (not implemented).
 
 ---
 
