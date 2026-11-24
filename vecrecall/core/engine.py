@@ -20,6 +20,7 @@ v2.2 起按职责拆分，本文件只保留 VecRecall 引擎本身：
 from __future__ import annotations
 
 import time
+import uuid
 from pathlib import Path
 
 from vecrecall.core.extractor import (
@@ -293,6 +294,62 @@ class VecRecall:
             m = self.add(**item)
             memories.append(m)
         return memories
+
+    # 会话存档粒度：turn = 每轮对话一条记忆（默认），session = 整段会话一条记忆
+    ARCHIVE_GRANULARITIES = ("turn", "session")
+
+    def archive_session(self, messages: list[dict], session_id: str = "",
+                        topic: str = "session", wing: str | None = None,
+                        granularity: str = "turn",
+                        importance: float | None = None,
+                        **kwargs) -> list[Memory]:
+        """
+        存档一段对话，返回写入的记忆列表。
+
+        granularity="turn"（默认，v2.3 起）：每轮对话一条记忆，共用同一个 session_id，
+          metadata 记录 turn_index 与 role，可用 session_memories() 按顺序还原整段会话。
+          LongMemEval-S 上，相比整段存一条：会话级 R_any@5 75.3% → 92.1%，
+          top-5 上下文约 13,900 → 900 token（词法嵌入，470 题）。
+        granularity="session"：整段会话合成一条记忆（v2.2 及以前的行为）。
+
+        - 空内容的轮次会跳过。
+        - turn 模式下关闭语义去重：同一句「好的」出现在不同会话里是不同的事实，
+          合并会丢失会话归属。
+        - 其余参数（visibility / owner / memory_type 等）原样传给 add()。
+        """
+        if granularity not in self.ARCHIVE_GRANULARITIES:
+            raise ValueError(
+                f"非法 granularity: {granularity}（仅 turn / session）")
+        sid = session_id or str(uuid.uuid4())
+        turns = [(i, str(m.get("role", "")), str(m.get("content", "")))
+                 for i, m in enumerate(messages or [])]
+        turns = [t for t in turns if t[2].strip()]
+        if not turns:
+            return []
+
+        if granularity == "session":
+            combined = "\n".join(f"[{role}] {content}" for _i, role, content in turns)
+            return [self.add(content=combined, topic=topic, wing=wing,
+                             session_id=sid, importance=importance, **kwargs)]
+
+        kwargs.setdefault("dedup", False)
+        base_meta = dict(kwargs.pop("metadata", None) or {})
+        out: list[Memory] = []
+        for i, role, content in turns:
+            meta = dict(base_meta)
+            meta.update({"turn_index": i, "role": role})
+            out.append(self.add(content=f"{role}: {content}", topic=topic, wing=wing,
+                                session_id=sid, importance=importance,
+                                metadata=meta, **kwargs))
+        return out
+
+    def session_memories(self, session_id: str) -> list[Memory]:
+        """按 session_id 取回一段会话的全部记忆（按 turn_index、时间排序，做可见性过滤）。"""
+        mems = self._kg.list_by_session(session_id)
+        if self.owner:
+            mems = [m for m in mems if self._visible_to(m, self.owner)]
+        mems = self._filter_memories(mems)
+        return sorted(mems, key=lambda m: (m.metadata.get("turn_index", 0), m.timestamp))
 
     # ── 四层记忆栈 ───────────────────────────
 

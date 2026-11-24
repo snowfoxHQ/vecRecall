@@ -2,6 +2,13 @@
 
 最新版本排在最前。详细设计说明见 [README.md](README.md) 的各版本升级说明章节。
 
+## 未发布（v2.3 开发中）
+
+- **会话存档默认改为逐轮存储**：新增 `VecRecall.archive_session(messages, granularity="turn")`，每轮对话一条记忆，共用同一个 `session_id`，metadata 记录 `turn_index` 与 `role`；新增 `session_memories(session_id)` 按顺序取回整段会话。MCP `mp_archive_session` 与 CLI `vr archive` 改为调用它。依据：LongMemEval-S（词法嵌入，470 题），相比整段存一条，会话级 R_any@5 75.3% → 92.1%、R_any@1 50.0% → 77.9%，top-5 上下文约 13,900 → 900 token；代价是记忆条数约增加 10 倍，SQLite 后端检索延迟 p50 从约 2 ms 升到约 18 ms。**行为变化**：需要旧行为请传 `granularity="session"` 或 `vr archive --granularity session`。逐轮模式默认关闭语义去重，避免不同会话里的相同语句被合并。`mp_archive_session` 返回值新增 `session_id` / `granularity` / `archived` / `ids`，保留 `archived_id`（逐轮模式下为第一条）。`vr archive` 读取文件改为显式 UTF-8，并新增 `--session-id`。
+- **hybrid 时间基准**：`search()` / `build_context()` 新增可选参数 `as_of`，按指定时刻计算时间新鲜度；不传时与之前一致。LongMemEval 中 hybrid 以提问时刻为基准后，knowledge-update +4.2、temporal-reasoning -3.1，整体 R_any@5 74.7%（vector 75.3%），hybrid 仍默认关闭。
+- **CI**：新增 GitHub Actions，测试矩阵 Linux Python 3.10–3.12 + Windows 3.12，含打包检查；新增基于 Trusted Publishing 的标签自动发布工作流与 `RELEASING.md`。
+- CLI 描述更新为新的定位。
+
 ## v2.2.0（2026-11-25）运行时原语并入核心
 
 把类型化、隔离、不可变与分链能力并入公开核心。新参数全部有默认值，老代码无需改动，老库打开时自动 migration。

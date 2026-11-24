@@ -343,6 +343,71 @@ def test_session_archive():
         p.close()
 
 
+def test_archive_session_granularity():
+    """v2.3：会话存档默认每轮一条记忆；session 粒度保留整段存档的旧行为。"""
+    print("\n── 会话存档粒度 ──")
+    messages = [
+        {"role": "user", "content": "我刚领养了一只金毛幼犬，叫 Max"},
+        {"role": "assistant", "content": "恭喜！先从笼内训练开始"},
+        {"role": "user", "content": ""},                       # 空轮次应跳过
+        {"role": "user", "content": "好的，谢谢"},
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        mems = p.archive_session(messages, session_id="s-turn")
+        test("默认 turn：每个非空轮次一条", len(mems) == 3, str(len(mems)))
+        test("turn：共用 session_id", all(m.session_id == "s-turn" for m in mems))
+        test("turn：记录 turn_index",
+             [m.metadata.get("turn_index") for m in mems] == [0, 1, 3])
+        test("turn：记录 role",
+             [m.metadata.get("role") for m in mems] == ["user", "assistant", "user"])
+        test("turn：内容带角色前缀", mems[0].content.startswith("user: "))
+
+        back = p.session_memories("s-turn")
+        test("session_memories 按顺序还原", [m.id for m in back] == [m.id for m in mems])
+
+        hit = p.search("金毛幼犬", n=1)
+        test("turn：检索命中具体那一轮", hit and hit[0].memory.id == mems[0].id)
+
+        # 不同会话里的同一句话不应被去重合并
+        again = p.archive_session([{"role": "user", "content": "好的，谢谢"}],
+                                  session_id="s-other")
+        test("turn：跨会话相同内容不合并", again[0].id != mems[2].id)
+
+        one = p.archive_session(messages, session_id="s-whole", granularity="session",
+                                dedup=False)
+        test("session 粒度：只写一条", len(one) == 1)
+        test("session 粒度：沿用旧格式",
+             one[0].content.startswith("[user] ") and "[assistant] " in one[0].content)
+
+        test("空会话返回空列表", p.archive_session([], session_id="empty") == [])
+        try:
+            p.archive_session(messages, granularity="paragraph")
+            test("非法粒度被拒绝", False)
+        except ValueError:
+            test("非法粒度被拒绝", True)
+
+        meta = p.archive_session([{"role": "user", "content": "自定义元数据测试一"},
+                                  {"role": "user", "content": "自定义元数据测试二"}],
+                                 session_id="s-meta", metadata={"src": "hook"})
+        test("turn：自定义 metadata 每轮都保留",
+             all(m.metadata.get("src") == "hook" for m in meta))
+        p.close()
+
+    # MCP 工具：默认逐轮，granularity=session 走旧行为，返回兼容字段
+    with tempfile.TemporaryDirectory() as d:
+        mcp = MCPServer(base_dir=d, wing="test",
+                        embedding_backend=BagOfWordsEmbeddingBackend(),
+                        vector_backend=NumpyVectorBackend())
+        r = mcp._call("mp_archive_session", {"messages": messages, "session_id": "m1"})
+        test("MCP 默认逐轮", r["archived"] == 3 and r["granularity"] == "turn", str(r))
+        test("MCP 保留 archived_id 字段", r["archived_id"] == r["ids"][0])
+        r2 = mcp._call("mp_archive_session", {"messages": messages, "session_id": "m2",
+                                              "granularity": "session"})
+        test("MCP session 粒度写一条", r2["archived"] == 1, str(r2))
+        mcp._palace.close()
+
+
 def test_persistence_across_restart():
     """默认后端升级：SqliteVectorBackend 重启不丢向量索引"""
     print("\n── 持久化：重启后仍可检索 ──")
@@ -1508,6 +1573,7 @@ def run_all():
     test_diary_isolation()
     test_heuristic_importance()
     test_session_archive()
+    test_archive_session_granularity()
     test_persistence_across_restart()
     test_bow_lexical_similarity()
     test_subword_embedding()

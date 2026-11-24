@@ -11,7 +11,7 @@ VecRecall — CLI
   vr topics [--wing WING]
   vr diary write AGENT "内容"
   vr diary read AGENT [QUERY]
-  vr archive SESSION_FILE
+  vr archive SESSION_FILE [--granularity turn|session] [--session-id ID]
   vr export WING [--out FILE]
   vr import FILE
   vr delete ID
@@ -504,13 +504,14 @@ def cmd_diary(args, cfg):
 
 def cmd_archive(args, cfg):
     p = get_palace(cfg)
-    with open(args.file) as f:
+    with open(args.file, encoding="utf-8") as f:
         messages = json.load(f)
-    combined = "\n".join(f"[{m['role']}] {m['content']}" for m in messages)
-    sid = str(int(time.time()))
-    mem = p.add(content=combined, topic="session",
-                wing=cfg.get("wing"), session_id=sid)
-    print(f"✓ 会话已存档  id={mem.id}  chars={len(combined)}")
+    sid = args.session_id or str(int(time.time()))
+    mems = p.archive_session(messages, session_id=sid, topic="session",
+                             wing=cfg.get("wing"), granularity=args.granularity)
+    chars = sum(len(m.content) for m in mems)
+    print(f"✓ 会话已存档  session_id={sid}  粒度={args.granularity}  "
+          f"记忆数={len(mems)}  chars={chars}")
     p.close()
 
 
@@ -916,8 +917,11 @@ def main():
     p_dr.add_argument("query", nargs="?", default="")
 
     # archive
-    p_arch = sub.add_parser("archive", help="存档会话 JSON")
+    p_arch = sub.add_parser("archive", help="存档会话 JSON（默认每轮对话一条记忆）")
     p_arch.add_argument("file")
+    p_arch.add_argument("--granularity", choices=["turn", "session"], default="turn",
+                        help="turn=每轮一条（默认）；session=整段一条（v2.2 行为）")
+    p_arch.add_argument("--session-id", default=None, help="指定 session_id（默认用时间戳）")
 
     # export
     p_exp = sub.add_parser("export", help="导出 wing 数据")

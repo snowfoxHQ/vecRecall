@@ -135,7 +135,7 @@ vr list --topic auth --full           # Include raw content
 # Tamper-proof verification (requires --chain enabled)
 vr verify
 
-# Archive a full session
+# Archive a session (one memory per turn by default; --granularity session for one per session)
 vr archive session.json
 
 # Export / Import
@@ -486,7 +486,7 @@ The threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `pa
 - `mp_diary_read` — Read agent diary
 
 **Session archive**
-- `mp_archive_session` — Archive a full conversation
+- `mp_archive_session` — Archive a conversation: one memory per turn sharing a session_id by default; `granularity=session` stores the whole session as one memory
 
 **Management**
 - `mp_stats` — System statistics

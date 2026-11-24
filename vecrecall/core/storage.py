@@ -150,6 +150,14 @@ class KnowledgeGraph:
         ).fetchall()
         return [self._row_to_memory(r) for r in rows]
 
+    def list_by_session(self, session_id: str) -> list[Memory]:
+        """按 session_id 取同一会话的全部记忆（时间升序）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM memories WHERE session_id=? ORDER BY timestamp ASC",
+            (session_id,),
+        ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
     def list_by_topic_key_prefix(self, prefix: str,
                                  wing: str | None = None) -> list[Memory]:
         """按分链键前缀取记忆（时间升序，即链写入顺序）。"""

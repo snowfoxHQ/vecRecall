@@ -137,7 +137,7 @@ vr list --topic auth --full         # 含原文
 # 防篡改验证（需 --chain 启用）
 vr verify
 
-# 存档整段会话
+# 存档会话（默认每轮对话一条记忆；--granularity session 为整段一条）
 vr archive session.json
 
 # 导出 / 导入
@@ -488,7 +488,7 @@ L2 的改动是关键：原版用 Room 名称匹配触发，VecRecall 改为语�
 - `mp_diary_read` — 读取 Agent 日记
 
 **会话存档**
-- `mp_archive_session` — 存档完整对话
+- `mp_archive_session` — 存档对话：默认每轮一条记忆、共用 session_id；`granularity=session` 时整段一条
 
 **管理**
 - `mp_stats` — 系统统计

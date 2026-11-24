@@ -360,7 +360,8 @@ TOOLS = [
     # ── 会话存档类 ──
     {
         "name": "mp_archive_session",
-        "description": "自动存档整段对话（Hooks 后台调用）",
+        "description": "存档一段对话（Hooks 后台调用）。默认每轮对话一条记忆，共用 session_id；"
+                       "granularity=session 时整段合成一条记忆（v2.2 及以前的行为）",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -377,6 +378,9 @@ TOOLS = [
                 "session_id": {"type": "string"},
                 "wing": {"type": "string"},
                 "topic": {"type": "string", "default": "session"},
+                "granularity": {"type": "string", "enum": ["turn", "session"],
+                                "default": "turn",
+                                "description": "turn=每轮一条（默认）；session=整段一条"},
             },
             "required": ["messages"],
         },
@@ -710,13 +714,21 @@ class MCPServer:
 
         elif name == "mp_archive_session":
             messages = args["messages"]
-            sid = args.get("session_id", str(int(time.time())))
-            combined = "\n".join(
-                f"[{m['role']}] {m['content']}" for m in messages
-            )
-            mem = p.add(content=combined, topic=args.get("topic", "session"),
-                        wing=args.get("wing", self._wing), session_id=sid)
-            return {"archived_id": mem.id, "chars": len(combined)}
+            sid = args.get("session_id") or str(int(time.time()))
+            gran = args.get("granularity", "turn")
+            mems = p.archive_session(messages, session_id=sid,
+                                     topic=args.get("topic", "session"),
+                                     wing=args.get("wing", self._wing),
+                                     granularity=gran)
+            return {
+                "session_id": sid,
+                "granularity": gran,
+                "archived": len(mems),
+                "ids": [m.id for m in mems],
+                # 兼容旧字段：整段模式下即唯一一条，逐轮模式下为第一条
+                "archived_id": mems[0].id if mems else None,
+                "chars": sum(len(m.content) for m in mems),
+            }
 
         elif name == "mp_stats":
             return p.stats()
