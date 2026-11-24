@@ -20,7 +20,7 @@ A cognitive memory system that also works as a memory runtime for multi-agent se
 | L2 trigger | Room name matching | **Semantic similarity threshold (default 0.55)** |
 | AAAK summary | Participates in retrieval index | **UI layer only, not indexed** |
 | Wing/Topic | Affects both retrieval and display | **UI organization only, no retrieval impact** |
-| Recall rate (R@5) | ~84% (with all features enabled) | **Semantic embedding 100% / zero-dependency lexical 76.2% (built-in eval set)** |
+| Recall | ~84% R@5 (all features enabled, self-reported by the original) | **LongMemEval-S session-level R_any@5 75.3% (zero-dependency lexical embedding, 470 questions, reproducible)** |
 
 The original's core problem: **the information organization layer and the retrieval path were tightly coupled**. Room filtering dropped recall from 96.6% to 89.4%, and AAAK participation in retrieval further dropped it to 84.2%. VecRecall separates the two completely: retrieval uses vectors, organization uses the SQLite UI layer.
 
@@ -266,20 +266,23 @@ vr graph-search "Alice" --hops 2
 
 ### Semantic Embedding Upgrade
 
-v2.0's embedding has two tiers; recall rates (R@5) are in `benchmarks/benchmark_recall.py` (built-in 21 mixed Chinese/English queries + 15 distractor documents, reproducible):
+v2.0's embedding has two tiers. Since v2.2 the public benchmark [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) is the official recall evaluation; the small built-in set is only a quick smoke test:
 
-| Embedding backend | R@5 | Dependency |
-|--|--|--|
-| Lexical (`bow`, default, zero-dependency) | 76.2% | None |
-| Semantic (`sentence`, multilingual MiniLM) | 100% | `pip install -e ".[sentence]"` |
+| Embedding backend | LongMemEval-S R_any@5 | LongMemEval-S R_any@10 | Built-in R@5 | Dependency |
+|--|--|--|--|--|
+| Lexical (`bow`, default, zero-dependency) | 75.3% | 84.9% | 76.2% | None |
+| Semantic (`sentence`, multilingual MiniLM) | TBD | TBD | 100% | `pip install -e ".[sentence]"` |
+
+LongMemEval-S: 470 questions (the 30 abstention questions are skipped, as in the official setup), about 48 sessions per question, one memory per session, pure vector retrieval; retrieval only, no QA scoring. Per-type results and instructions are in [benchmarks/README.md](benchmarks/README.md); raw results are in `benchmarks/results/`.
 
 - **Zero-dependency lexical enhancement**: `BagOfWordsEmbeddingBackend` was upgraded from "whole word + Chinese bigrams" to "whole word + English character 3/4-grams (subword) + Chinese trigrams", capturing word-form variants (running/run) and spelling variants (database/databases) with no external dependency.
 - **Multilingual semantic model**: the `sentence` / `auto` default model was upgraded from English `all-MiniLM-L6-v2` to multilingual `paraphrase-multilingual-MiniLM-L12-v2` (Chinese-friendly), overridable via `--embed-model`.
-- The eval set deliberately includes semantically-equivalent paraphrases with zero lexical overlap (e.g. "程序崩溃了怎么办" → "应用 crash 时的排查步骤"), so 76.2% is the bare floor without a semantic model; plugging in a semantic model reaches 100%. The 96.6% claimed in v1 was a reproduction of the "original's pure-vector ceiling" (old eval set, no script); from v2 onward it is re-quantified with a reproducible benchmark.
+- The eval set deliberately includes semantically-equivalent paraphrases with zero lexical overlap (e.g. "程序崩溃了怎么办" → "应用 crash 时的排查步骤"), but with only 36 candidates it is far too small: 100% there says little about real-world recall. Use the LongMemEval numbers. The 96.6% claimed in v1 was a reproduction of the "original's pure-vector ceiling" (old eval set, no script); from v2 onward it is re-quantified with a reproducible benchmark.
 
 ```bash
-python benchmarks/benchmark_recall.py          # Lexical
-python benchmarks/benchmark_recall.py --all    # Lexical + semantic
+python benchmarks/benchmark_recall.py          # Built-in smoke test (lexical)
+python benchmarks/benchmark_recall.py --all    # Built-in smoke test (lexical + semantic)
+python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.json   # LongMemEval (download data first)
 ```
 
 ---
@@ -498,6 +501,52 @@ The threshold is adjustable: `vr-mcp` tool `mp_set_l2_threshold`, or in code `pa
 
 ---
 
+## Extension Hooks
+
+v2.2 adds `vecrecall.core.hooks` so extension packages can attach behavior without modifying the core. No hooks are registered by default, so behavior is unchanged.
+
+| Hook point | When | Signature | Typical use |
+|---|---|---|---|
+| `before_write` | Before a write | `fn(fields) -> fields \| None`; raise to reject the write | Write authorization, tenant tagging, field rewriting |
+| `after_write` | After a write (including dedup merges) | `fn(memory, merged)` | Audit logging, syncing to other systems |
+| `recall_filter` | Before results are returned | `fn(memories, viewer) -> memories`; may only remove items | Read authorization, tenant isolation |
+| `on_delete` | After a delete | `fn(memory_id)` | Auditing, cascading cleanup |
+
+`recall_filter` applies to `search`, `build_context` (L1/L2/L3), `query_procedural`, `query_by_topic_key` and `graph_search`.
+
+```python
+from vecrecall import VecRecall
+
+palace = VecRecall(base_dir="~/.vr", wing="team", owner="agent-a")
+
+# 1. Register callbacks directly
+def deny_secrets(fields):
+    if "INTERNAL ONLY" in fields["content"]:
+        raise PermissionError("write not allowed")
+palace.hooks.register("before_write", deny_secrets)
+palace.hooks.register("after_write", lambda mem, merged: print("wrote", mem.id, merged))
+
+# 2. Plugin object: implement register(registry)
+class TenantPlugin:
+    def register(self, registry):
+        registry.register("recall_filter",
+                          lambda mems, viewer: [m for m in mems
+                                                if m.metadata.get("tenant") == "t1"])
+palace.hooks.install(TenantPlugin())
+```
+
+Plugins can also be discovered through the `vecrecall.plugins` entry point group, enabled explicitly with `VecRecall(load_plugins=True)`:
+
+```toml
+# pyproject.toml of the extension package
+[project.entry-points."vecrecall.plugins"]
+my_plugin = "my_package.plugin:TenantPlugin"
+```
+
+The core only defines the hook points; it contains no authorization, compliance or business logic.
+
+---
+
 ## Pluggable Backends
 
 ```python
@@ -580,6 +629,11 @@ v2.2 brings typed, isolated, immutable and per-key-chained memory into the publi
 | **Topic queries** | `query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)` verify a single topic chain |
 | **Tighter cross-wing links** | `mp_link` across wings only for memories that are shared on both sides |
 | **Core boundary** | The core accepts only generic primitives (`memory_type` / `visibility` / `owner` / `retention_policy` / `topic_key`); scenario schemas stay out, enforced by a source-assertion test |
+| **Code split** | `core/engine.py` is split into `models.py` / `vectors.py` / `embeddings.py` / `storage.py`; `from vecrecall.core.engine import ...` keeps working |
+| **Extension hooks** | New `core/hooks.py`: `before_write` / `after_write` / `recall_filter` / `on_delete`; see "Extension Hooks" above |
+| **Unified credential rules** | `guard.py` delegates to `redaction.py`, merging the two rule sets; adds detection of inline assignments in prose |
+| **Fix: search dropped negative-score results** | `search()` and L3 now default to `min_score=None` and always return top-n. **Behavior change**: pass `min_score=0.0` explicitly to keep the old cutoff |
+| **Public benchmark** | New `benchmarks/longmemeval.py`; LongMemEval-S lexical baseline R_any@5 75.3% |
 
 > Known limit: immutable memories only grow; long-running deployments need cold-storage archiving (not implemented).
 

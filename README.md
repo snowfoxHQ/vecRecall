@@ -22,7 +22,7 @@
 | L2 触发 | Room 名称匹配 | **语义相似度阈值（默认 0.55）** |
 | AAAK 摘要 | 参与检索索引 | **只写 UI 层，不进向量库** |
 | Wing/Topic | 同时影响检索和展示 | **只影响 UI 组织和浏览** |
-| 召回率（R@5） | ~84%（启用全部特性时） | **语义嵌入 100% / 零依赖词法 76.2%（内置评测集）** |
+| 召回率 | ~84% R@5（启用全部特性时，原版自报） | **LongMemEval-S 会话级 R_any@5 75.3%（零依赖词法嵌入，470 题，可复现）** |
 
 原版最大的问题：**信息组织层和检索路径耦合在一起**。Room 过滤让检索召回率从 96.6% 降到 89.4%，AAAK 参与检索后进一步降到 84.2%。VecRecall 把两件事彻底分开：检索走向量，组织走 SQLite UI 层。
 
@@ -268,20 +268,23 @@ vr graph-search "Alice" --hops 2
 
 ### 语义嵌入升级
 
-v2.0 的嵌入分两层，召回率（R@5）见 `benchmarks/benchmark_recall.py`（内置 21 组中英混合 query + 15 干扰文档，可复现）：
+v2.0 的嵌入分两层。v2.2 起以公开基准 [LongMemEval](https://github.com/xiaowu0162/LongMemEval)（ICLR 2025）作为正式召回评测，内置小评测集只用于快速冒烟：
 
-| 嵌入后端 | R@5 | 依赖 |
-|--|--|--|
-| 词法（`bow`，默认零依赖） | 76.2% | 无 |
-| 语义（`sentence`，多语言 MiniLM） | 100% | `pip install -e ".[sentence]"` |
+| 嵌入后端 | LongMemEval-S R_any@5 | LongMemEval-S R_any@10 | 内置评测 R@5 | 依赖 |
+|--|--|--|--|--|
+| 词法（`bow`，默认零依赖） | 75.3% | 84.9% | 76.2% | 无 |
+| 语义（`sentence`，多语言 MiniLM） | 待测 | 待测 | 100% | `pip install -e ".[sentence]"` |
+
+LongMemEval-S：470 道题（按官方做法跳过 30 道拒答题），每题约 48 个会话，每个会话一条记忆，纯向量检索，只评检索、不评问答。按题型的结果与运行方法见 [benchmarks/README.md](benchmarks/README.md)，原始结果在 `benchmarks/results/`。
 
 - **零依赖词法增强**：`BagOfWordsEmbeddingBackend` 从「整词 + 中文二元组」升级为「整词 + 英文字符 3/4-gram（subword）+ 中文三元组」，可捕获词形变化（running/run）与拼写变体（database/databases），无需任何外部依赖。
 - **语义模型多语言化**：`sentence` / `auto` 默认模型从英文 `all-MiniLM-L6-v2` 升级为多语言 `paraphrase-multilingual-MiniLM-L12-v2`（中文友好），可用 `--embed-model` 覆盖。
-- 评测集刻意包含「词面不重叠、语义等价」的近义改写（如「程序崩溃了怎么办」→「应用 crash 时的排查步骤」），因此词法 76.2% 是无语义模型的裸下限，接上语义模型即达 100%。第一版宣称的 96.6% 是「原版纯向量上限」的复现（旧评测集，无脚本）；v2 起改为可复现 benchmark 重新量化。
+- 评测集刻意包含「词面不重叠、语义等价」的近义改写（如「程序崩溃了怎么办」→「应用 crash 时的排查步骤」），内置评测只有 36 条候选，规模太小，100% 不代表真实场景的召回能力，请以 LongMemEval 数字为准。第一版宣称的 96.6% 是「原版纯向量上限」的复现（旧评测集，无脚本）；v2 起改为可复现 benchmark 重新量化。
 
 ```bash
-python benchmarks/benchmark_recall.py          # 词法
-python benchmarks/benchmark_recall.py --all    # 词法 + 语义
+python benchmarks/benchmark_recall.py          # 内置冒烟评测（词法）
+python benchmarks/benchmark_recall.py --all    # 内置冒烟评测（词法 + 语义）
+python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.json   # LongMemEval（需先下载数据）
 ```
 
 ---
@@ -500,6 +503,52 @@ L2 的改动是关键：原版用 Room 名称匹配触发，VecRecall 改为语�
 
 ---
 
+## 扩展钩子
+
+v2.2 新增 `vecrecall.core.hooks`，外部扩展包可以在不修改核心代码的前提下挂载行为。默认不注册任何钩子，行为不变。
+
+| 调用点 | 触发时机 | 签名 | 典型用途 |
+|---|---|---|---|
+| `before_write` | 写入前 | `fn(fields) -> fields \| None`，抛异常即拒绝写入 | 写入授权、打租户标记、字段改写 |
+| `after_write` | 写入后（含去重合并） | `fn(memory, merged)` | 审计记录、同步到其他系统 |
+| `recall_filter` | 检索结果返回前 | `fn(memories, viewer) -> memories`，只能删减 | 读取授权、租户隔离 |
+| `on_delete` | 删除后 | `fn(memory_id)` | 审计、级联清理 |
+
+`recall_filter` 作用于 `search`、`build_context`（L1/L2/L3）、`query_procedural`、`query_by_topic_key` 与 `graph_search`。
+
+```python
+from vecrecall import VecRecall
+
+palace = VecRecall(base_dir="~/.vr", wing="team", owner="agent-a")
+
+# 1. 直接注册回调
+def deny_secrets(fields):
+    if "内部机密" in fields["content"]:
+        raise PermissionError("不允许写入")
+palace.hooks.register("before_write", deny_secrets)
+palace.hooks.register("after_write", lambda mem, merged: print("写入", mem.id, merged))
+
+# 2. 插件对象：实现 register(registry)
+class TenantPlugin:
+    def register(self, registry):
+        registry.register("recall_filter",
+                          lambda mems, viewer: [m for m in mems
+                                                if m.metadata.get("tenant") == "t1"])
+palace.hooks.install(TenantPlugin())
+```
+
+也可以通过 entry point 自动发现插件（组名 `vecrecall.plugins`），需显式开启 `VecRecall(load_plugins=True)`：
+
+```toml
+# 扩展包的 pyproject.toml
+[project.entry-points."vecrecall.plugins"]
+my_plugin = "my_package.plugin:TenantPlugin"
+```
+
+核心只定义调用点，不包含任何授权、合规或业务逻辑。
+
+---
+
 ## 后端可插拔
 
 ```python
@@ -582,6 +631,11 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心。所有
 | **按主题查询** | `query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)`，可单独验证一条主题链 |
 | **跨 wing 关联收紧** | `mp_link` 跨 wing 仅对双方 shared 的记忆开放 |
 | **核心边界** | 核心只接受 `memory_type` / `visibility` / `owner` / `retention_policy` / `topic_key` 等通用原语，任何场景 schema 不进核心，由源码断言测试守护 |
+| **代码拆分** | `core/engine.py` 拆出 `models.py` / `vectors.py` / `embeddings.py` / `storage.py`；`from vecrecall.core.engine import ...` 写法保持可用 |
+| **扩展钩子** | 新增 `core/hooks.py`：`before_write` / `after_write` / `recall_filter` / `on_delete`，见上文「扩展钩子」 |
+| **统一凭据规则** | `guard.py` 委托 `redaction.py`，两套规则合一；补充句中赋值等识别 |
+| **修复：检索丢弃负分结果** | `search()` 与 L3 默认 `min_score=None`，始终返回 top-n。**行为变化**：需要按分数截断请显式传 `min_score=0.0` |
+| **公开评测** | 新增 `benchmarks/longmemeval.py`，LongMemEval-S 词法嵌入基线 R_any@5 75.3% |
 
 > 已知边界：immutable 记忆只增不减，长期运行需要配套冷存储归档（未实现）。
 
