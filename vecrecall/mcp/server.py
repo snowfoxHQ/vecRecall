@@ -152,7 +152,8 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "n": {"type": "integer", "default": 10},
-                "min_score": {"type": "number", "default": 0.0},
+                "min_score": {"type": "number",
+                              "description": "可选相似度阈值；不传则始终返回 top-n"},
                 "hybrid": {"type": "boolean", "default": False,
                            "description": "融合相似度+重要性+时间新鲜度重排"},
                 "acceptance_query": {"type": "string",
@@ -501,7 +502,7 @@ class MCPServer:
             _ok(req_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vecrecall", "version": "2.1.0"},
+                "serverInfo": {"name": "vecrecall", "version": "2.2.0"},
             })
         elif method == "tools/list":
             _ok(req_id, {"tools": TOOLS})
@@ -524,6 +525,7 @@ class MCPServer:
 
     def _call(self, name: str, args: dict) -> Any:
         p = self._palace
+
 
         if name == "mp_add":
             m = p.add(**{k: v for k, v in args.items()})
@@ -572,7 +574,7 @@ class MCPServer:
 
         elif name == "mp_search":
             results = p.search(args["query"], args.get("n", 10),
-                               args.get("min_score", 0.0),
+                               args.get("min_score"),
                                args.get("hybrid", False),
                                args.get("acceptance_query"))
             return _format_results(results)
@@ -590,7 +592,7 @@ class MCPServer:
             candidate = args["candidate"]
             try:
                 parsed = json.loads(candidate)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 parsed = candidate
             return evaluate_memory(parsed, args["query"]).as_dict()
 

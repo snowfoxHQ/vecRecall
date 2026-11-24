@@ -1,4 +1,6 @@
-"""VecRecall 检索召回率评测（R@5 / MRR）。
+"""VecRecall 内置召回率评测（R@1/5/10、nDCG@10、MRR）。
+
+规模很小（21 组），只做快速冒烟检查；正式评测见 benchmarks/longmemeval.py。
 
 可复现：内置中英混合评测集（query → 正确文档 + 干扰文档池），
 评测不同嵌入后端的**纯向量** R@5（不经过结构过滤，与检索路径设计一致）。
@@ -22,6 +24,9 @@ from vecrecall.core.engine import (  # noqa: E402
     VecRecall, NumpyVectorBackend, BagOfWordsEmbeddingBackend,
     build_embedding_backend,
 )
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _metrics import average, score  # noqa: E402
 
 # 每个元素：(用户查询, 正确答案文档)
 # 覆盖：中文词面重叠 / 中文近义改写 / 英文词形变化 / 中英混杂 / 生活偏好
@@ -72,8 +77,8 @@ DISTRACTORS = [
 ]
 
 
-def evaluate(embedder, cases=CASES, distractors=DISTRACTORS):
-    """返回 (R@5, MRR)。所有正确文档 + 干扰文档混入同一向量库，逐 query 检索 top-5。"""
+def evaluate(embedder, cases=CASES, distractors=DISTRACTORS, hybrid=False):
+    """返回指标 dict。所有正确文档 + 干扰文档混入同一向量库，逐 query 检索 top-10。"""
     with tempfile.TemporaryDirectory() as d:
         p = VecRecall(
             base_dir=d, wing="bench", embedding_backend=embedder,
@@ -85,50 +90,51 @@ def evaluate(embedder, cases=CASES, distractors=DISTRACTORS):
         for dist in distractors:
             p.add(dist, topic="distractor")
 
-        hits = 0
-        mrr = 0.0
+        rows = []
         for (q, _doc), cid in zip(cases, correct_ids):
-            ranked = [r.memory.id for r in p.search(q, n=5)]
-            if cid in ranked:
-                hits += 1
-                mrr += 1.0 / (ranked.index(cid) + 1)
+            ranked = [r.memory.id for r in p.search(q, n=10, hybrid=hybrid)]
+            rows.append(score(ranked, {cid}, (1, 5, 10)))
         p.close()
-
-    n = len(cases)
-    return hits / n, mrr / n
+    return average(rows)
 
 
-def run(name, embedder):
-    r5, mrr = evaluate(embedder)
-    print(f"  {name:<16} R@5 = {r5 * 100:5.1f}%    MRR = {mrr:.3f}")
-    return r5
+def run(name, embedder, hybrid=False):
+    m = evaluate(embedder, hybrid=hybrid)
+    print(f"  {name:<22} R@1 = {m['recall_any@1'] * 100:5.1f}%   "
+          f"R@5 = {m['recall_any@5'] * 100:5.1f}%   R@10 = {m['recall_any@10'] * 100:5.1f}%   "
+          f"nDCG@10 = {m['ndcg@10']:.3f}   MRR = {m['mrr']:.3f}")
+    return m['recall_any@5']
 
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="VecRecall R@5 召回率评测")
+    ap = argparse.ArgumentParser(description="VecRecall 内置召回率评测（快速冒烟）")
     ap.add_argument("--all", action="store_true", help="同时评测语义模型（sentence）")
     ap.add_argument("--model", default=None, help="语义模型名（默认多语言 MiniLM）")
     args = ap.parse_args()
 
-    print("=" * 62)
-    print("VecRecall 检索召回率评测（纯向量 R@5，无结构过滤）")
+    print("=" * 78)
+    print("VecRecall 内置召回率评测（纯向量，无结构过滤）")
     print(f"评测集：{len(CASES)} 组 query + {len(DISTRACTORS)} 干扰文档 = "
           f"{len(CASES) + len(DISTRACTORS)} 文档候选")
-    print("=" * 62)
+    print("说明：规模很小，只用于快速检查是否改坏；正式数字请用 benchmarks/longmemeval.py")
+    print("=" * 78)
 
-    run("bow（零依赖词法）", BagOfWordsEmbeddingBackend())
+    bow = BagOfWordsEmbeddingBackend()
+    run("bow（零依赖词法）", bow)
+    run("bow + hybrid", bow, hybrid=True)
 
     if args.all or args.model:
         print()
         try:
             emb = build_embedding_backend("sentence", model=args.model)
             run("sentence（语义）", emb)
+            run("sentence + hybrid", emb, hybrid=True)
         except Exception as e:  # noqa: BLE001
             print(f"  sentence 评测未完成：{type(e).__name__}: {e}")
             print("  （模型未下载或网络不可用，可先 `pip install -e \".[sentence]\"`）")
 
-    print("=" * 62)
+    print("=" * 78)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,227 @@
+[
+ {
+  "question_id": "sample_ssu_1",
+  "question_type": "single-session-user",
+  "question": "What breed is my dog?",
+  "answer": "Golden retriever",
+  "question_date": "2023/06/01 (Thu) 10:00",
+  "haystack_session_ids": [
+   "s1",
+   "s2",
+   "s3",
+   "s4"
+  ],
+  "haystack_dates": [
+   "2023/05/01 (Mon) 09:00",
+   "2023/05/10 (Wed) 12:30",
+   "2023/05/15 (Mon) 18:00",
+   "2023/05/20 (Sat) 08:15"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "Can you suggest a quick pasta recipe for dinner?"
+    },
+    {
+     "role": "assistant",
+     "content": "Try garlic butter spaghetti with parmesan."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "I just adopted a golden retriever puppy named Max, any training tips?",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Start with crate training and short sessions of basic commands."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "What is the capital of Australia?"
+    },
+    {
+     "role": "assistant",
+     "content": "Canberra."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Help me plan a weekend hiking trip near the mountains."
+    },
+    {
+     "role": "assistant",
+     "content": "Pack water, layers and check the trail map."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "s2"
+  ]
+ },
+ {
+  "question_id": "sample_ku_1",
+  "question_type": "knowledge-update",
+  "question": "Where do I work now?",
+  "answer": "Stripe",
+  "question_date": "2023/09/01 (Fri) 10:00",
+  "haystack_session_ids": [
+   "k1",
+   "k2",
+   "k3",
+   "k4"
+  ],
+  "haystack_dates": [
+   "2023/01/05 (Thu) 09:00",
+   "2023/03/12 (Sun) 20:00",
+   "2023/07/02 (Sun) 11:00",
+   "2023/08/20 (Sun) 15:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I work at Google as a software engineer and want to improve my resume.",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Highlight measurable impact in each bullet."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Recommend some science fiction novels."
+    },
+    {
+     "role": "assistant",
+     "content": "The Three-Body Problem and Dune."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "I just started my new job at Stripe this week, how do I onboard well?",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Meet your team early and read the internal docs."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "How do I make cold brew coffee at home?"
+    },
+    {
+     "role": "assistant",
+     "content": "Steep coarse grounds in cold water for 12 hours."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "k1",
+   "k3"
+  ]
+ },
+ {
+  "question_id": "sample_ms_1",
+  "question_type": "multi-session",
+  "question": "How many musical instruments do I play?",
+  "answer": "Two: guitar and piano",
+  "question_date": "2023/10/01 (Sun) 10:00",
+  "haystack_session_ids": [
+   "m1",
+   "m2",
+   "m3",
+   "m4"
+  ],
+  "haystack_dates": [
+   "2023/02/01 (Wed) 09:00",
+   "2023/04/01 (Sat) 09:00",
+   "2023/06/01 (Thu) 09:00",
+   "2023/08/01 (Tue) 09:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "I have been practicing guitar chords every evening, which songs are good for beginners?",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Try Wonderwall and Horse with No Name."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "What should I pack for a business trip to London?"
+    },
+    {
+     "role": "assistant",
+     "content": "An umbrella and a light jacket."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "I also started piano lessons, how long should I practice scales each day?",
+     "has_answer": true
+    },
+    {
+     "role": "assistant",
+     "content": "Fifteen minutes of scales is a good start."
+    }
+   ],
+   [
+    {
+     "role": "user",
+     "content": "Give me a vegetarian lunch idea."
+    },
+    {
+     "role": "assistant",
+     "content": "A chickpea salad wrap."
+    }
+   ]
+  ],
+  "answer_session_ids": [
+   "m1",
+   "m3"
+  ]
+ },
+ {
+  "question_id": "sample_abs_1_abs",
+  "question_type": "single-session-user",
+  "question": "What is my cat's name?",
+  "answer": "Not mentioned",
+  "question_date": "2023/10/01 (Sun) 10:00",
+  "haystack_session_ids": [
+   "a1"
+  ],
+  "haystack_dates": [
+   "2023/01/01 (Sun) 09:00"
+  ],
+  "haystack_sessions": [
+   [
+    {
+     "role": "user",
+     "content": "Tell me a joke."
+    },
+    {
+     "role": "assistant",
+     "content": "Why did the chicken cross the road?"
+    }
+   ]
+  ],
+  "answer_session_ids": []
+ }
+]

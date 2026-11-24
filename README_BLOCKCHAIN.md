@@ -34,6 +34,12 @@ VecRecall 的区块链上下文存档模块。
 - 任何篡改都会导致哈希链断裂
 - `verify_chain()` 可随时验证完整性
 
+**按 topic_key 分链（v2.2）：**
+- 链的链接与验证均按 `(wing, topic_key)` 独立进行：`new_block(topic_key=...)` / `verify_chain(wing, topic_key)`
+- 默认链（`topic_key=""`）向后兼容，老数据库打开时自动补列
+- 适合把需要单独留证的记忆按主题分链（如 `topic_key="release:v2.2"`），一个主题的证据可以独立验证和导出，不受其他主题写入影响
+- `VecRecall.add(topic_key=...)` 写入记忆时透传 `topic_key`；区块同时写入列和 metadata，验证时交叉校验，防止串链
+
 ---
 
 ## 安装
@@ -126,8 +132,19 @@ results = chain.search_by_keywords(
     date_end="2026-04-30",
 )
 
-# 验证链完整性
+# 写入指定 topic_key 的独立子链（v2.2）
+block = chain.new_block(
+    content="发布决策：v2.2 冻结检索接口",
+    wing="my-project",
+    topic_key="release:v2.2",   # 与默认链互相独立
+)
+
+# 验证链完整性（默认链）
 ok, msg = chain.verify_chain("my-project")
+
+# 验证指定 topic_key 的子链（v2.2）
+ok, msg = chain.verify_chain("my-project", topic_key="release:v2.2")
+blocks = chain.get_blocks_by_topic("my-project", "release:v2.2")
 
 # 统计
 stats = chain.stats("my-project")

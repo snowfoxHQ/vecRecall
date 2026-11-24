@@ -103,17 +103,30 @@ class BlockChain:
         CREATE INDEX IF NOT EXISTS idx_kw ON kw_index(keyword);
         CREATE INDEX IF NOT EXISTS idx_kw_date ON kw_index(date_label);
         """)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self):
+        """老库无痛升级：blocks 表补 topic_key 列（按主题分链）。"""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(blocks)")}
+        if "topic_key" not in cols:
+            # 默认 '' = 原全局链（按 wing 单链），老数据无缝归入
+            self._conn.execute(
+                "ALTER TABLE blocks ADD COLUMN topic_key TEXT DEFAULT ''")
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_blocks_wing_topic "
+            "ON blocks(wing, topic_key)")
 
     # ── 写入 ──────────────────────────────────
 
-    def add_block(self, block: Block) -> Block:
+    def add_block(self, block: Block, topic_key: str = "") -> Block:
         """添加区块到链上，同时更新关键词索引"""
         self._conn.execute("""
         INSERT OR REPLACE INTO blocks
           (block_id, idx, timestamp, prev_hash, content, token_count,
-           keywords, date_label, wing, session_id, trigger, hash, group_id, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           keywords, date_label, wing, session_id, trigger, hash, group_id,
+           metadata, topic_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             block.block_id, block.index, block.timestamp, block.prev_hash,
             block.content, block.token_count,
@@ -121,6 +134,7 @@ class BlockChain:
             block.date_label, block.wing, block.session_id,
             block.trigger, block.hash, block.group_id,
             json.dumps(block.metadata, ensure_ascii=False),
+            topic_key,
         ))
 
         # 更新关键词倒排索引
@@ -145,11 +159,22 @@ class BlockChain:
         trigger: str = "manual",
         keywords: list[str] | None = None,
         metadata: dict | None = None,
+        topic_key: str = "",
     ) -> Block:
-        """创建并存储新区块"""
-        prev = self.get_latest_block(wing)
+        """
+        创建并存储新区块。
+
+        topic_key：分链键。空 = 默认全局链（按 wing 单链，向后兼容）；
+        非空 = (wing, topic_key) 独立子链（如 contract:<id> 的审计证据链），
+        可单独 verify_chain(wing, topic_key) 验证和导出。
+        """
+        prev = self.get_latest_block(wing, topic_key)
         prev_hash = prev.hash if prev else GENESIS_HASH
         index = (prev.index + 1) if prev else 0
+
+        meta = dict(metadata or {})
+        if topic_key:
+            meta["topic_key"] = topic_key  # 哈希覆盖外的双写，verify 时交叉校验
 
         block = Block.create(
             index=index,
@@ -159,9 +184,9 @@ class BlockChain:
             session_id=session_id,
             trigger=trigger,
             keywords=keywords or [],
-            metadata=metadata or {},
+            metadata=meta,
         )
-        return self.add_block(block)
+        return self.add_block(block, topic_key)
 
     # ── 查询 ──────────────────────────────────
 
@@ -171,11 +196,23 @@ class BlockChain:
         ).fetchone()
         return self._row_to_block(row) if row else None
 
-    def get_latest_block(self, wing: str = "default") -> Optional[Block]:
+    def get_latest_block(self, wing: str = "default",
+                         topic_key: str = "") -> Optional[Block]:
+        """取 (wing, topic_key) 子链的末块。"""
         row = self._conn.execute(
-            "SELECT * FROM blocks WHERE wing=? ORDER BY idx DESC LIMIT 1", (wing,)
+            "SELECT * FROM blocks WHERE wing=? AND topic_key=? "
+            "ORDER BY idx DESC LIMIT 1", (wing, topic_key)
         ).fetchone()
         return self._row_to_block(row) if row else None
+
+    def get_blocks_by_topic(self, wing: str, topic_key: str,
+                            limit: int = 50) -> list[Block]:
+        """取 (wing, topic_key) 子链的全部区块（按链序，供按主题导出）。"""
+        rows = self._conn.execute(
+            "SELECT * FROM blocks WHERE wing=? AND topic_key=? "
+            "ORDER BY idx ASC LIMIT ?", (wing, topic_key, limit)
+        ).fetchall()
+        return [self._row_to_block(r) for r in rows]
 
     def get_blocks_by_wing(self, wing: str, limit: int = 50) -> list[Block]:
         rows = self._conn.execute(
@@ -356,10 +393,17 @@ class BlockChain:
 
     # ── 验证 ──────────────────────────────────
 
-    def verify_chain(self, wing: str = "default") -> tuple[bool, str]:
-        """验证哈希链完整性，返回 (是否完整, 错误信息)"""
+    def verify_chain(self, wing: str = "default",
+                     topic_key: str = "") -> tuple[bool, str]:
+        """
+        验证哈希链完整性，返回 (是否完整, 错误信息)。
+
+        topic_key 为空验证默认全局链；非空验证 (wing, topic_key) 子链
+        ——单个契约/主题的审计证据可独立验证。
+        """
         blocks = self._conn.execute(
-            "SELECT * FROM blocks WHERE wing=? ORDER BY idx ASC", (wing,)
+            "SELECT * FROM blocks WHERE wing=? AND topic_key=? ORDER BY idx ASC",
+            (wing, topic_key)
         ).fetchall()
 
         if not blocks:
@@ -377,9 +421,14 @@ class BlockChain:
             if block.prev_hash != prev_hash:
                 return False, f"区块 #{block.index} 前向哈希断裂"
 
+            # 双写一致性：列与 metadata 的 topic_key 必须一致（防串链）
+            if topic_key and block.metadata.get("topic_key") != topic_key:
+                return False, f"区块 #{block.index} topic_key 不一致，疑似串链"
+
             prev_hash = block.hash
 
-        return True, f"链完整，共 {len(blocks)} 个区块"
+        label = f"wing={wing}" + (f", topic={topic_key}" if topic_key else "")
+        return True, f"链完整（{label}），共 {len(blocks)} 个区块"
 
     # ── 统计 ──────────────────────────────────
 

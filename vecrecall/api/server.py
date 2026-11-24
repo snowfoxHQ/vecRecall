@@ -45,7 +45,7 @@ from vecrecall.core.engine import (
     VecRecall, build_embedding_backend, memory_to_dict,
 )
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 
 def _err(msg: str) -> dict:
@@ -206,6 +206,7 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
             if not m:
                 raise ValueError(f"记忆不存在: {segs[1]}")
             return memory_to_dict(m, full=True)
+
         raise ValueError(f"未知路径: /{'/'.join(segs)}")
 
     # ── POST ──
@@ -237,7 +238,7 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
         if head == "search":
             results = p.search(
                 body["query"], body.get("n", 10),
-                body.get("min_score", 0.0), body.get("hybrid", False),
+                body.get("min_score"), body.get("hybrid", False),
             )
             return {"results": [
                 {**memory_to_dict(r.memory),

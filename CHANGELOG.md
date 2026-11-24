@@ -2,6 +2,26 @@
 
 最新版本排在最前。详细设计说明见 [README.md](README.md) 的各版本升级说明章节。
 
+## v2.2.0（2026-11-25）运行时原语并入核心
+
+把类型化、隔离、不可变与分链能力并入公开核心。新参数全部有默认值，老代码无需改动，老库打开时自动 migration。
+
+- **类型化记忆**：`memory_type`（episodic / semantic / procedural）；`semantic` 必进时序图谱；`procedural` 用 `query_procedural(scenario_tags, version)` 精确匹配。
+- **类型过滤**：`build_context(memory_types=[...])` 一处过滤 L1/L2/L3。
+- **隔离**：`visibility`（private/shared）+ `owner`，与 wing 组成三元组；`update_visibility()` 原子操作。
+- **不可变记忆**：`retention_policy`（decay / immutable）；immutable 不去重、不遗忘、不 prune、不蒸馏、不脱敏，始终进入 L1；`update_retention_policy()` 原子操作。
+- **哈希链分链**：`blocks` 表新增 `topic_key`，按 `(wing, topic_key)` 建链与验证；老库自动 migration。
+- **按主题查询**：`query_by_topic_key(prefix)` + `verify_integrity(topic_key=...)`。
+- **跨 wing 关联收紧**：`mp_link` 仅对双方 shared 的记忆开放。
+- **核心边界守护**：新增源码断言测试，核心不得出现场景 schema（如 `contract_id`），也不得引用 `vecrecall.adapters`。场景适配器不随核心发布。
+- **代码拆分**：`core/engine.py` 拆出 `models.py` / `vectors.py` / `embeddings.py` / `storage.py`，原有 `from vecrecall.core.engine import ...` 写法保持可用。
+- **扩展钩子**：新增 `core/hooks.py`，提供 `before_write` / `after_write` / `recall_filter` / `on_delete` 四个调用点，支持插件对象与 `vecrecall.plugins` entry point（`VecRecall(load_plugins=True)`）。默认不注册任何钩子，行为不变。
+- **统一凭据规则**：`core/guard.py` 改为委托 `core/redaction.py`，两套规则合并为一套；补充句中赋值（如「数据库 password=[REDACTED_PASSWORD] 别外传」）、较短的 npm token、宽松 JWT 的识别。`find_secrets()` 返回的类型名改为英文（如 `CREDENTIAL`）。
+- **修复：检索丢弃负分结果**。余弦相似度可以为负（词法嵌入在没有共同词时尤其常见），旧版 `search()` 默认 `min_score=0.0`，会把排在后面的真正答案直接丢掉，出现「库里只有 4 条、取 top-5 却返回不到答案」。现在 `search()` 与 L3 检索默认 `min_score=None`，始终返回 top-n；MCP `mp_search` 与 REST `/search` 同步去掉 0.0 默认值。**行为变化**：需要按分数截断的调用方请显式传 `min_score=0.0`。L2 触发阈值（0.55）、去重阈值（0.92）、`graph_search` 默认 0.1 不变。
+- **评测**：新增 `benchmarks/longmemeval.py`（LongMemEval 会话级 / 轮次级检索评测，vector / hybrid / dedup / graph 四种配置对比）与共用指标 `benchmarks/_metrics.py`；内置评测 `benchmark_recall.py` 增加 R@1、R@10、nDCG@10 与 hybrid 对比。
+- **文档**：更正 README 中「记忆原文以明文存储（无 at-rest 加密）」的过时说明；测试章节列出全部测试文件。
+- 版本号在 `pyproject.toml`、`vecrecall/__init__.py`、`api/server.py`、`mcp/server.py` 统一为 `2.2.0`。MCP 工具数保持 34。
+
 ## v2.1.0（2026-11-21）治理层
 
 在不改变 v2.0 认知层与检索语义的前提下补齐治理机制，默认行为不变：
@@ -12,7 +32,6 @@
 - **仓库知识映射**：`vr repo-map build|update|validate`，产物在 `.vecrecall/repo/`，按 baseline SHA 增量更新并校验；不进入向量索引。
 - 新增 CLI 子命令 3 个，MCP 工具 32 → 34。回归：158 + 72 + 34 + 19 + 14 项断言全通过。
 
-> 注：本仓库是 v2.0 认知层 + 治理层的延续；类型化 / 隔离 / 审计豁免 / 分链 / 契约适配层位于 [snowfoxHQ/vecrecall-runtime](https://github.com/snowfoxHQ/vecrecall-runtime) 的 v2.1/v2.2。
 
 ## v2.0.0 认知层
 

@@ -1,5 +1,5 @@
 """
-VecRecall — 改进版核心引擎
+VecRecall — 记忆运行时核心引擎
 
 关键设计原则：
   检索路径  → 纯向量语义，不经过任何结构过滤
@@ -7,722 +7,43 @@ VecRecall — 改进版核心引擎
   AAAK      → 只生成摘要供 UI 展示，不参与检索
   四层栈    → L0/L1/L2/L3 保留，L2 触发改为语义阈值
 
-v1.1 升级：
-  SqliteVectorBackend        零依赖持久化向量后端（默认，重启不丢索引）
-  BagOfWordsEmbeddingBackend 零依赖词法语义嵌入（默认，替代纯哈希）
-  update / delete / prune    记忆生命周期管理，向量与 SQLite 同步
-  reindex                   从原文重建向量索引（嵌入后端迁移）
-  hybrid 检索               相似度 + 重要性 + 时间衰减融合重排（opt-in）
-  use_blockchain             写入时同步生成哈希链区块，verify_integrity 防篡改
-  estimate_tokens           中英混合 token 估算
+v2.2 起按职责拆分，本文件只保留 VecRecall 引擎本身：
+  core/models.py      Memory / RetrievalResult / ContextBundle / 序列化
+  core/vectors.py     向量后端（Numpy / SQLite / Chroma）
+  core/embeddings.py  嵌入后端（BagOfWords / SentenceTransformer / Ollama / API）
+  core/storage.py     KnowledgeGraph（SQLite 元数据与原文）
+  core/hooks.py       扩展钩子（before_write / after_write / recall_filter / on_delete）
 
-v2.0 升级（认知层）：
-  MemoryExtractor           可插拔记忆抽取器（Heuristic 零依赖 / LLM Ollama+API）
-  extractor 集成            add 时自动抽取 topic/importance/摘要/实体/关系
-  dedup                     语义去重合并：相似度 ≥ dedup_threshold 合并到既有记忆
+为向后兼容，上述模块的公开名字仍可从 vecrecall.core.engine 导入。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-import math
-import os
-import re
-import sqlite3
-import struct
 import time
-import uuid
-import urllib.error
-import urllib.request
-from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Iterator, Optional
 
 from vecrecall.core.extractor import (
-    Extraction, MemoryExtractor, heuristic_importance, heuristic_summary,
+    Extraction, MemoryExtractor, HeuristicExtractor,
+    heuristic_importance, heuristic_summary,  # noqa: F401
 )
 from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
 from vecrecall.core.temporal_graph import TemporalGraph
+from vecrecall.core.hooks import HookRegistry, load_entry_point_plugins
+# 向后兼容的再导出
+from vecrecall.core.models import (  # noqa: F401
+    estimate_tokens, memory_to_dict, Memory, RetrievalResult, ContextBundle,
+)
+from vecrecall.core.vectors import (  # noqa: F401
+    VectorBackend, NumpyVectorBackend, SqliteVectorBackend, ChromaVectorBackend,
+)
+from vecrecall.core.embeddings import (  # noqa: F401
+    EmbeddingBackend, HashEmbeddingBackend, BagOfWordsEmbeddingBackend,
+    SentenceTransformerBackend, OllamaEmbeddingBackend, APIEmbeddingBackend,
+    DEFAULT_SENTENCE_MODEL, build_embedding_backend,
+)
+from vecrecall.core.storage import KnowledgeGraph  # noqa: F401
 
-
-# ─────────────────────────────────────────────
-# 工具函数
-# ─────────────────────────────────────────────
-
-def estimate_tokens(text: str) -> int:
-    """
-    更准确的 token 估算（中英混合）：
-      中文 ≈ 0.7 token/字，英文/其他 ≈ 4 字符/token
-    """
-    cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
-    other = len(text) - cjk
-    return int(cjk * 0.7 + other / 4) + 1
-
-
-def memory_to_dict(m, full: bool = False) -> dict:
-    """将 Memory 序列化为 dict（MCP / REST / 导出统一使用）。"""
-    d = {
-        "id": m.id,
-        "wing": m.wing,
-        "topic": m.topic,
-        "importance": round(m.importance, 3),
-        "timestamp": m.timestamp,
-        "ui_summary": m.ui_summary,
-        "content_preview": m.content[:200],
-    }
-    if full:
-        d["content"] = m.content
-        d["session_id"] = m.session_id
-        d["metadata"] = m.metadata
-    return d
-
-
-# ─────────────────────────────────────────────
-# 数据模型
-# ─────────────────────────────────────────────
-
-@dataclass
-class Memory:
-    """一条完整的记忆记录（逐字存储原文）"""
-    id: str
-    wing: str                   # 项目/人物标识（组织用，不参与检索过滤）
-    topic: str                  # 话题标签（组织用，不参与检索过滤）
-    content: str                # 原始全文，永不改写
-    timestamp: float
-    session_id: str
-    importance: float = 0.5     # 0-1，由 LLM 或启发式评分
-    ui_summary: str = ""        # AAAK 压缩摘要，仅供 UI 展示
-    metadata: dict = field(default_factory=dict)
-
-    @classmethod
-    def create(cls, wing: str, topic: str, content: str,
-               session_id: str = "", importance: float = 0.5,
-               ui_summary: str = "", metadata: dict | None = None) -> "Memory":
-        return cls(
-            id=str(uuid.uuid4()),
-            wing=wing,
-            topic=topic,
-            content=content,
-            timestamp=time.time(),
-            session_id=session_id or str(uuid.uuid4()),
-            importance=importance,
-            ui_summary=ui_summary,
-            metadata=metadata or {},
-        )
-
-
-@dataclass
-class RetrievalResult:
-    memory: Memory
-    score: float        # 余弦相似度，0-1
-    layer: str          # L1 / L2 / L3
-    acceptance: dict | None = None  # 三项验收结果（可选，不影响默认排序）
-
-
-@dataclass
-class ContextBundle:
-    """四层记忆栈打包结果，交给 AI 直接用"""
-    l0_identity: str            # ~50 tokens
-    l1_key_moments: list[RetrievalResult]   # ~600 tokens
-    l2_topic_context: list[RetrievalResult] # ~300 tokens，按需
-    l3_deep_results: list[RetrievalResult]  # 按需触发
-    total_tokens_estimate: int
-
-
-# ─────────────────────────────────────────────
-# 向量适配器（可插拔后端）
-# ─────────────────────────────────────────────
-
-class VectorBackend:
-    """抽象接口，默认用轻量 numpy 实现；生产可替换为 ChromaDB"""
-
-    def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-        raise NotImplementedError
-
-    def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-        """返回 [(memory_id, score, payload), ...]"""
-        raise NotImplementedError
-
-    def delete(self, memory_id: str) -> None:
-        raise NotImplementedError
-
-
-class NumpyVectorBackend(VectorBackend):
-    """纯 numpy 实现，零依赖，适合开发和测试"""
-
-    def __init__(self):
-        self._store: dict[str, tuple[list[float], dict]] = {}
-
-    def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-        self._store[memory_id] = (vector, payload)
-
-    def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-        import math
-        results = []
-        qv = vector
-        qnorm = math.sqrt(sum(x * x for x in qv)) or 1e-9
-
-        for mid, (v, payload) in self._store.items():
-            vnorm = math.sqrt(sum(x * x for x in v)) or 1e-9
-            dot = sum(a * b for a, b in zip(qv, v))
-            score = dot / (qnorm * vnorm)
-            if score >= min_score:
-                results.append((mid, score, payload))
-
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:n]
-
-    def delete(self, memory_id: str) -> None:
-        self._store.pop(memory_id, None)
-
-    def count(self) -> int:
-        return len(self._store)
-
-    def clear(self) -> None:
-        self._store.clear()
-
-
-class SqliteVectorBackend(VectorBackend):
-    """
-    零依赖持久化向量后端（SQLite 存储，重启不丢数据）。
-
-    与 NumpyVectorBackend 的区别：
-      - NumpyVectorBackend 纯内存，进程退出即丢失全部向量索引
-      - 本后端把向量以二进制 BLOB 存入 SQLite，默认安装下记忆可跨会话检索
-    """
-
-    def __init__(self, db_path: str):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.execute("""
-        CREATE TABLE IF NOT EXISTS vectors (
-            id TEXT PRIMARY KEY,
-            dim INTEGER NOT NULL,
-            vec BLOB NOT NULL,
-            payload TEXT DEFAULT '{}'
-        )""")
-        self._conn.commit()
-
-    def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-        blob = struct.pack(f"<{len(vector)}d", *vector)
-        self._conn.execute(
-            "INSERT OR REPLACE INTO vectors (id, dim, vec, payload) VALUES (?, ?, ?, ?)",
-            (memory_id, len(vector), blob,
-             json.dumps(payload, ensure_ascii=False)),
-        )
-        self._conn.commit()
-
-    def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-        qnorm = math.sqrt(sum(x * x for x in vector)) or 1e-9
-        results = []
-        for mid, dim, blob, payload in self._conn.execute(
-            "SELECT id, dim, vec, payload FROM vectors"
-        ):
-            v = struct.unpack(f"<{dim}d", blob)
-            vnorm = math.sqrt(sum(x * x for x in v)) or 1e-9
-            score = sum(a * b for a, b in zip(vector, v)) / (qnorm * vnorm)
-            if score >= min_score:
-                results.append((mid, score, json.loads(payload)))
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:n]
-
-    def delete(self, memory_id: str) -> None:
-        self._conn.execute("DELETE FROM vectors WHERE id=?", (memory_id,))
-        self._conn.commit()
-
-    def count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
-
-    def clear(self) -> None:
-        self._conn.execute("DELETE FROM vectors")
-        self._conn.commit()
-
-    def close(self) -> None:
-        self._conn.close()
-
-
-try:
-    import chromadb
-
-    class ChromaVectorBackend(VectorBackend):
-        """生产级 ChromaDB 后端"""
-
-        def __init__(self, persist_dir: str, collection: str = "memories"):
-            self._client = chromadb.PersistentClient(path=persist_dir)
-            self._col = self._client.get_or_create_collection(
-                name=collection,
-                metadata={"hnsw:space": "cosine"},
-            )
-
-        def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-            self._col.upsert(
-                ids=[memory_id],
-                embeddings=[vector],
-                metadatas=[{k: str(v) if not isinstance(v, (str, int, float, bool)) else v
-                            for k, v in payload.items()}],
-            )
-
-        def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-            res = self._col.query(query_embeddings=[vector], n_results=max(n, 1))
-            out = []
-            ids = res["ids"][0]
-            dists = res["distances"][0]
-            metas = res["metadatas"][0]
-            for mid, dist, meta in zip(ids, dists, metas):
-                score = 1.0 - dist   # cosine distance → similarity
-                if score >= min_score:
-                    out.append((mid, score, meta))
-            return out[:n]
-
-        def delete(self, memory_id: str) -> None:
-            self._col.delete(ids=[memory_id])
-
-except ImportError:
-    ChromaVectorBackend = None  # type: ignore
-
-
-# ─────────────────────────────────────────────
-# 嵌入适配器（可插拔）
-# ─────────────────────────────────────────────
-
-class EmbeddingBackend:
-    def embed(self, text: str) -> list[float]:
-        raise NotImplementedError
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        return [self.embed(t) for t in texts]
-
-
-class HashEmbeddingBackend(EmbeddingBackend):
-    """确定性哈希向量，仅供测试，无语义"""
-
-    DIM = 128
-
-    def embed(self, text: str) -> list[float]:
-        import struct
-        h = hashlib.sha256(text.encode()).digest()
-        vals = struct.unpack("f" * (len(h) // 4), h)
-        # 填充或裁剪到 DIM
-        v = list(vals)
-        while len(v) < self.DIM:
-            v.extend(v)
-        v = v[:self.DIM]
-        norm = sum(x * x for x in v) ** 0.5 or 1.0
-        return [x / norm for x in v]
-
-
-class BagOfWordsEmbeddingBackend(EmbeddingBackend):
-    """
-    零依赖语义嵌入（特征哈希 / hashing trick，含 subword 增强）。
-
-    中文拆成单字 + 相邻二元组 + 三元组；英文/数字按整词，
-    并额外拆分字符 3-gram / 4-gram（subword），以捕获词形变化
-    与拼写变体（如 running/run、database/databases、颜色/色彩）。
-    哈希到固定维度并带正负号，余弦相似度 ≈ 词面 + 子词重合度，
-    是零依赖（无 sentence-transformers / Ollama / API）下最强的
-    语义召回，且无状态、确定性、无外部依赖。
-    """
-
-    DIM = 512
-
-    _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
-
-    @staticmethod
-    def _is_cjk(ch: str) -> bool:
-        return '\u4e00' <= ch <= '\u9fff'
-
-    def _tokens(self, text: str) -> list[str]:
-        raw = self._TOKEN_RE.findall(text.lower())
-        out: list[str] = []
-        for i, t in enumerate(raw):
-            if len(t) == 1 and self._is_cjk(t):
-                # 单字
-                out.append(t)
-                # 相邻中文二元组 / 三元组（捕获词序信息）
-                if i + 1 < len(raw) and len(raw[i + 1]) == 1 \
-                        and self._is_cjk(raw[i + 1]):
-                    out.append(t + raw[i + 1])
-                    if i + 2 < len(raw) and len(raw[i + 2]) == 1 \
-                            and self._is_cjk(raw[i + 2]):
-                        out.append(t + raw[i + 1] + raw[i + 2])
-            else:
-                # 整词
-                out.append(t)
-                # 英文字符 3-gram / 4-gram（subword，捕获词形与拼写变体）
-                if len(t) >= 4:
-                    for j in range(len(t) - 2):
-                        out.append("#" + t[j:j + 3])
-                if len(t) >= 6:
-                    for j in range(len(t) - 3):
-                        out.append("#" + t[j:j + 4])
-        return out
-
-    def embed(self, text: str) -> list[float]:
-        tf: dict[str, int] = {}
-        for t in self._tokens(text):
-            tf[t] = tf.get(t, 0) + 1
-
-        v = [0.0] * self.DIM
-        for token, freq in tf.items():
-            weight = 1.0 + math.log(freq)
-            h = hashlib.sha256(token.encode()).digest()
-            idx = ((h[0] << 8) | h[1]) % self.DIM
-            sign = 1.0 if h[2] & 1 else -1.0
-            v[idx] += sign * weight
-
-        norm = math.sqrt(sum(x * x for x in v)) or 1.0
-        return [x / norm for x in v]
-
-
-# 默认本地语义模型：多语言 MiniLM（384 维，中英等 50+ 语言友好）
-DEFAULT_SENTENCE_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-
-try:
-    from sentence_transformers import SentenceTransformer
-
-    class SentenceTransformerBackend(EmbeddingBackend):
-        def __init__(self, model: str = DEFAULT_SENTENCE_MODEL):
-            self._model = SentenceTransformer(model)
-
-        def embed(self, text: str) -> list[float]:
-            return self._model.encode(text, normalize_embeddings=True).tolist()
-
-        def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return self._model.encode(texts, normalize_embeddings=True).tolist()
-
-except ImportError:
-    SentenceTransformerBackend = None  # type: ignore
-
-
-class OllamaEmbeddingBackend(EmbeddingBackend):
-    """
-    本地 Ollama 嵌入后端（零 API Key，数据不出本机）。
-
-    依赖本地运行的 Ollama 服务（默认 http://localhost:11434），
-    推荐模型：nomic-embed-text / bge-m3（中文）。
-
-    优先走新版 /api/embed（支持批量），旧版 Ollama 自动回退到
-    /api/embeddings（单条）。
-    """
-
-    def __init__(self, model: str = "nomic-embed-text",
-                 base_url: str = "http://localhost:11434",
-                 timeout: float = 60.0):
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-    def _post(self, path: str, payload: dict) -> dict:
-        req = urllib.request.Request(
-            self.base_url + path,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-
-    def embed(self, text: str) -> list[float]:
-        return self.embed_batch([text])[0]
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        # 新版 /api/embed 支持批量
-        try:
-            data = self._post("/api/embed", {"model": self.model, "input": texts})
-            if "embeddings" in data:
-                return [list(v) for v in data["embeddings"]]
-        except (urllib.error.HTTPError, urllib.error.URLError):
-            pass  # 旧版 Ollama，回退单条接口
-
-        # 回退旧版 /api/embeddings（仅单条）
-        out: list[list[float]] = []
-        for t in texts:
-            data = self._post("/api/embeddings", {"model": self.model, "prompt": t})
-            out.append(list(data["embedding"]))
-        return out
-
-
-class APIEmbeddingBackend(EmbeddingBackend):
-    """
-    OpenAI 兼容远程嵌入 API 后端。
-
-    可指向 OpenAI、或任意 OpenAI 兼容的嵌入服务
-    （硅基流动 / DeepSeek / 通义 / 本地 vLLM 等），
-    只需调整 base_url / api_key / model。
-    """
-
-    def __init__(self, model: str = "text-embedding-3-small",
-                 api_key: str | None = None,
-                 base_url: str = "https://api.openai.com/v1",
-                 timeout: float = 60.0):
-        self.model = model
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
-
-    def _post(self, payload: dict) -> dict:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        req = urllib.request.Request(
-            self.base_url + "/embeddings",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-
-    def embed(self, text: str) -> list[float]:
-        return self.embed_batch([text])[0]
-
-    def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        data = self._post({"model": self.model, "input": texts})
-        items = sorted(data["data"], key=lambda x: x.get("index", 0))
-        return [list(item["embedding"]) for item in items]
-
-
-def build_embedding_backend(kind: str = "auto", **kwargs) -> EmbeddingBackend:
-    """
-    按名称构造嵌入后端（供 CLI / MCP / REST / Python API 统一使用）。
-
-    kind 取值：
-      auto     → 优先 sentence-transformers，否则词法 BagOfWords（零依赖）
-      bow      → BagOfWordsEmbeddingBackend（零依赖词法语义）
-      sentence → SentenceTransformerBackend（本地模型）
-      ollama   → OllamaEmbeddingBackend（本地 Ollama，零 API Key）
-      api      → APIEmbeddingBackend（OpenAI 兼容远程 API）
-
-    通用 kwargs：model / base_url / api_key
-    """
-    kind = (kind or "auto").lower()
-    if kind == "bow":
-        return BagOfWordsEmbeddingBackend()
-    if kind == "sentence":
-        if SentenceTransformerBackend is None:
-            raise RuntimeError(
-                "sentence-transformers 未安装，请 `pip install sentence-transformers`")
-        return SentenceTransformerBackend(kwargs.get("model") or DEFAULT_SENTENCE_MODEL)
-    if kind == "ollama":
-        return OllamaEmbeddingBackend(
-            model=kwargs.get("model") or "nomic-embed-text",
-            base_url=kwargs.get("base_url") or kwargs.get("url") or "http://localhost:11434",
-            timeout=kwargs.get("timeout") or 60.0,
-        )
-    if kind == "api":
-        return APIEmbeddingBackend(
-            model=kwargs.get("model") or "text-embedding-3-small",
-            api_key=kwargs.get("api_key"),
-            base_url=kwargs.get("base_url") or kwargs.get("url") or "https://api.openai.com/v1",
-            timeout=kwargs.get("timeout") or 60.0,
-        )
-    # auto
-    if SentenceTransformerBackend is not None:
-        return SentenceTransformerBackend()
-    return BagOfWordsEmbeddingBackend()
-
-
-# ─────────────────────────────────────────────
-# 知识图谱（SQLite）
-# ─────────────────────────────────────────────
-
-class KnowledgeGraph:
-    """SQLite 存储记忆元数据和跨 wing 关联，不参与检索路径"""
-
-    def __init__(self, db_path: str, cipher: Cipher | None = None):
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        # 静态加密：非 None 时 content/ui_summary/metadata 加密落盘
-        self._cipher = cipher
-        self._setup()
-
-    def _setup(self):
-        self._conn.executescript("""
-        CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            wing TEXT NOT NULL,
-            topic TEXT NOT NULL,
-            content TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            session_id TEXT NOT NULL,
-            importance REAL DEFAULT 0.5,
-            ui_summary TEXT DEFAULT '',
-            metadata TEXT DEFAULT '{}'
-        );
-        CREATE INDEX IF NOT EXISTS idx_wing ON memories(wing);
-        CREATE INDEX IF NOT EXISTS idx_topic ON memories(topic);
-        CREATE INDEX IF NOT EXISTS idx_importance ON memories(importance DESC);
-
-        CREATE TABLE IF NOT EXISTS cross_links (
-            id TEXT PRIMARY KEY,
-            source_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            link_type TEXT DEFAULT 'related',
-            weight REAL DEFAULT 1.0,
-            FOREIGN KEY(source_id) REFERENCES memories(id),
-            FOREIGN KEY(target_id) REFERENCES memories(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_links_src ON cross_links(source_id);
-        """)
-        self._conn.commit()
-
-    def save(self, memory: Memory) -> None:
-        content, ui_summary = memory.content, memory.ui_summary
-        meta_raw = json.dumps(memory.metadata)
-        if self._cipher is not None:
-            content = self._cipher.encrypt(content)
-            ui_summary = self._cipher.encrypt(ui_summary)
-            meta_raw = self._cipher.encrypt(meta_raw)
-        self._conn.execute("""
-        INSERT OR REPLACE INTO memories
-          (id, wing, topic, content, timestamp, session_id, importance, ui_summary, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (memory.id, memory.wing, memory.topic, content,
-              memory.timestamp, memory.session_id, memory.importance,
-              ui_summary, meta_raw))
-        self._conn.commit()
-
-    def get(self, memory_id: str) -> Optional[Memory]:
-        row = self._conn.execute(
-            "SELECT * FROM memories WHERE id=?", (memory_id,)
-        ).fetchone()
-        return self._row_to_memory(row) if row else None
-
-    def get_many(self, ids: list[str]) -> dict[str, Memory]:
-        if not ids:
-            return {}
-        placeholders = ",".join("?" * len(ids))
-        rows = self._conn.execute(
-            f"SELECT * FROM memories WHERE id IN ({placeholders})", ids
-        ).fetchall()
-        return {r[0]: self._row_to_memory(r) for r in rows}
-
-    def top_by_importance(self, wing: str | None, n: int) -> list[Memory]:
-        if wing:
-            rows = self._conn.execute(
-                "SELECT * FROM memories WHERE wing=? ORDER BY importance DESC LIMIT ?",
-                (wing, n)
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM memories ORDER BY importance DESC LIMIT ?", (n,)
-            ).fetchall()
-        return [self._row_to_memory(r) for r in rows]
-
-    def list_wings(self) -> list[str]:
-        rows = self._conn.execute(
-            "SELECT DISTINCT wing FROM memories ORDER BY wing"
-        ).fetchall()
-        return [r[0] for r in rows]
-
-    def list_topics(self, wing: str | None = None) -> list[str]:
-        if wing:
-            rows = self._conn.execute(
-                "SELECT DISTINCT topic FROM memories WHERE wing=? ORDER BY topic", (wing,)
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT DISTINCT topic FROM memories ORDER BY topic"
-            ).fetchall()
-        return [r[0] for r in rows]
-
-    def add_link(self, source_id: str, target_id: str,
-                 link_type: str = "related", weight: float = 1.0) -> None:
-        self._conn.execute("""
-        INSERT OR REPLACE INTO cross_links (id, source_id, target_id, link_type, weight)
-        VALUES (?, ?, ?, ?, ?)
-        """, (str(uuid.uuid4()), source_id, target_id, link_type, weight))
-        self._conn.commit()
-
-    def delete(self, memory_id: str) -> bool:
-        """删除一条记忆及其关联，返回是否删除成功"""
-        cur = self._conn.execute(
-            "DELETE FROM memories WHERE id=?", (memory_id,)
-        )
-        deleted = cur.rowcount > 0
-        if deleted:
-            self._conn.execute(
-                "DELETE FROM cross_links WHERE source_id=? OR target_id=?",
-                (memory_id, memory_id)
-            )
-        self._conn.commit()
-        return deleted
-
-    def iter_all(self, wing: str | None = None) -> Iterator[Memory]:
-        """遍历全部记忆（按写入顺序）"""
-        if wing:
-            rows = self._conn.execute(
-                "SELECT * FROM memories WHERE wing=? ORDER BY timestamp", (wing,)
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM memories ORDER BY timestamp"
-            ).fetchall()
-        for r in rows:
-            yield self._row_to_memory(r)
-
-    def count(self, wing: str | None = None) -> int:
-        if wing:
-            return self._conn.execute(
-                "SELECT COUNT(*) FROM memories WHERE wing=?", (wing,)
-            ).fetchone()[0]
-        return self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-
-    def stats(self) -> dict:
-        total = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
-        wings = len(self.list_wings())
-        links = self._conn.execute("SELECT COUNT(*) FROM cross_links").fetchone()[0]
-        return {"total_memories": total, "wings": wings, "cross_links": links}
-
-    def query_memories(self, wing: str | None = None, topic: str | None = None,
-                       limit: int = 50, offset: int = 0,
-                       sort: str = "importance") -> tuple[list[Memory], int]:
-        """
-        分页查询记忆，返回 (memories, total)。
-        sort: "importance"（默认，按重要性降序）或 "recent"（按时间降序）。
-        """
-        where: list[str] = []
-        params: list = []
-        if wing:
-            where.append("wing=?")
-            params.append(wing)
-        if topic:
-            where.append("topic=?")
-            params.append(topic)
-        wsql = (" WHERE " + " AND ".join(where)) if where else ""
-
-        total = self._conn.execute(
-            f"SELECT COUNT(*) FROM memories{wsql}", params).fetchone()[0]
-
-        if sort == "recent":
-            order = "timestamp DESC"
-        else:
-            order = "importance DESC, timestamp DESC"
-        rows = self._conn.execute(
-            f"SELECT * FROM memories{wsql} ORDER BY {order} LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
-        return [self._row_to_memory(r) for r in rows], total
-
-    def _row_to_memory(self, row) -> Memory:
-        content, ui_summary, meta_raw = row[3], row[7], row[8]
-        if self._cipher is not None:
-            content = self._cipher.decrypt(content)
-            ui_summary = self._cipher.decrypt(ui_summary)
-            meta_raw = self._cipher.decrypt(meta_raw)
-        return Memory(
-            id=row[0], wing=row[1], topic=row[2], content=content,
-            timestamp=row[4], session_id=row[5], importance=row[6],
-            ui_summary=ui_summary, metadata=json.loads(meta_raw)
-        )
-
-    def close(self):
-        self._conn.close()
-
-
-# ─────────────────────────────────────────────
-# 改进版四层记忆栈引擎
-# ─────────────────────────────────────────────
 
 class VecRecall:
     """
@@ -758,20 +79,31 @@ class VecRecall:
         dedup: bool = True,
         dedup_threshold: float = 0.92,
         encryption_key: str | None = None,
+        owner: str = "",
         redact_payloads: bool = False,
+        hooks: HookRegistry | None = None,
+        load_plugins: bool = False,
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.wing = wing
         self.identity_prompt = identity_prompt
+        # 双层隔离：本实例的写入者/查看者标识（agent id / user id）。
+        # 空 = 单机模式，不做可见性过滤（保持旧行为）。
+        self.owner = owner
 
         # 认知层：写入时自动抽取结构化信息（None=关闭，保持词法级零依赖）
         self._extractor = extractor
         # 语义去重：相似度 ≥ 阈值时合并到既有记忆（避免重复）
         self.dedup = dedup
         self.dedup_threshold = dedup_threshold
-        # 写入前脱敏（不可逆，默认关闭；与加密互补，加密不阻止写入库）
+        # 写入前脱敏（不可逆，默认关闭；immutable 审计记忆永不脱敏）
         self.redact_payloads = bool(redact_payloads)
+
+        # 扩展钩子：外部扩展包在这里挂载（默认为空，不改变任何行为）
+        self.hooks = hooks if hooks is not None else HookRegistry()
+        if load_plugins:
+            load_entry_point_plugins(self.hooks)
 
         # 存储后端：自动检测可用的最佳后端
         if embedding_backend is not None:
@@ -814,7 +146,12 @@ class VecRecall:
     def add(self, content: str, topic: str = "general",
             wing: str | None = None, importance: float | None = None,
             session_id: str = "", ui_summary: str = "",
-            metadata: dict | None = None, dedup: bool | None = None) -> Memory:
+            metadata: dict | None = None, dedup: bool | None = None,
+            memory_type: str = "episodic", visibility: str = "private",
+            owner: str = "", retention_policy: str = "decay",
+            scenario_tags: list[str] | None = None,
+            policy_version: str | None = None,
+            topic_key: str = "") -> Memory:
         """
         存入一条记忆。
 
@@ -823,11 +160,17 @@ class VecRecall:
         - ui_summary（AAAK）只写入 KG，不进入向量
         - 配置了 extractor 时，自动抽取 topic/importance/摘要/实体/关系
         - 语义去重：相似度 ≥ dedup_threshold 时合并到既有记忆（occurrences+1）
+        - memory_type: episodic / semantic / procedural
+          · semantic 强制走时序知识图谱（无 extractor 时启发式兜底）
+          · procedural 走「场景标签 + 版本」精确匹配（query_procedural）
+        - visibility + owner: 双层隔离（private 仅 owner 可见，shared 同 wing 可见）
+        - retention_policy: decay（默认衰减）/ immutable（豁免去重与遗忘）
+        - scenario_tags / policy_version: procedural 专用（写入 metadata）
         """
         w = wing or self.wing
 
         redaction_counts: dict[str, int] = {}
-        if self.redact_payloads:
+        if self.redact_payloads and retention_policy != "immutable":
             from vecrecall.core.redaction import (
                 has_meaningful_payload,
                 redact_memory_payload,
@@ -840,10 +183,31 @@ class VecRecall:
             if ui_summary:
                 ui_summary = redact_memory_payload(ui_summary).text
 
+        # 扩展钩子：写入前（可改写字段或抛异常拒绝写入）
+        if self.hooks.has("before_write"):
+            fields = self.hooks.run_before_write({
+                "content": content, "topic": topic, "wing": w,
+                "importance": importance, "session_id": session_id,
+                "ui_summary": ui_summary, "metadata": dict(metadata or {}),
+                "memory_type": memory_type, "visibility": visibility,
+                "owner": owner, "retention_policy": retention_policy,
+                "topic_key": topic_key,
+            })
+            content = fields["content"]; topic = fields["topic"]; w = fields["wing"]
+            importance = fields["importance"]; session_id = fields["session_id"]
+            ui_summary = fields["ui_summary"]; metadata = fields["metadata"]
+            memory_type = fields["memory_type"]; visibility = fields["visibility"]
+            owner = fields["owner"]; retention_policy = fields["retention_policy"]
+            topic_key = fields["topic_key"]
+
         # 认知层抽取（仅在未显式提供时填充）
         ext: Extraction | None = None
         if self._extractor is not None:
             ext = self._extractor.extract(content)
+        elif memory_type == "semantic":
+            # semantic 记忆强制走时序图谱：即使未配置 extractor，
+            # 也用启发式抽取兜底，保证实体/关系一定入图。
+            ext = HeuristicExtractor().extract(content)
 
         if ext is not None:
             if topic == "general" and ext.topic != "general":
@@ -859,15 +223,25 @@ class VecRecall:
         meta = dict(metadata or {})
         if redaction_counts:
             meta["redaction_counts"] = redaction_counts
+        if self.redact_payloads and retention_policy == "immutable":
+            meta["redaction_skipped"] = "immutable"
         if ext is not None:
             if ext.entities:
                 meta.setdefault("entities", ext.entities)
             if ext.relations:
                 meta.setdefault("relations", ext.relations)
+        # procedural 记忆：场景标签 + 策略版本写入 metadata，供精确匹配
+        if memory_type == "procedural":
+            if scenario_tags:
+                meta["scenario_tags"] = list(scenario_tags)
+            if policy_version:
+                meta["policy_version"] = policy_version
 
         # 语义去重合并（相似度过高时不再新增）
+        # 豁免：retention_policy=immutable（审计记忆）语义再相似也各存各的，
+        # 两笔金额差一分的审批决策是不同的审计事实，绝不能合并 occurrences。
         do_dedup = self.dedup if dedup is None else dedup
-        if do_dedup:
+        if do_dedup and retention_policy != "immutable":
             existing = self._dedup_candidate(content)
             if existing is not None:
                 existing.importance = max(existing.importance, importance)
@@ -875,12 +249,16 @@ class VecRecall:
                     existing.metadata.get("occurrences", 1) + 1
                 self._kg.save(existing)
                 self._ingest_graph(ext, existing.id, existing.timestamp)
+                self.hooks.run_after_write(existing, True)
                 return existing
 
         mem = Memory.create(
             wing=w, topic=topic, content=content,
             session_id=session_id, importance=importance,
             ui_summary=ui_summary, metadata=meta,
+            memory_type=memory_type, visibility=visibility,
+            owner=owner, retention_policy=retention_policy,
+            topic_key=topic_key,
         )
 
         # 1. 向量索引：只索引原文，不含结构信息（这是关键改动）
@@ -893,7 +271,7 @@ class VecRecall:
         # 3. 时序知识图谱：实体/关系/状态演化
         self._ingest_graph(ext, mem.id, mem.timestamp)
 
-        # 4. 可选：哈希链区块（防篡改审计）
+        # 4. 可选：哈希链区块（防篡改审计；topic_key 非空时入独立子链）
         if self._chain is not None:
             from vecrecall.blockchain import extract_keywords
             self._chain.new_block(
@@ -902,8 +280,10 @@ class VecRecall:
                 session_id=mem.session_id,
                 trigger="memory",
                 keywords=extract_keywords(content),
+                topic_key=topic_key,
             )
 
+        self.hooks.run_after_write(mem, False)
         return mem
 
     def add_batch(self, items: list[dict]) -> list[Memory]:
@@ -922,15 +302,20 @@ class VecRecall:
         load_l2: bool = True,
         load_l3: bool = False,
         hybrid: bool = False,
+        memory_types: list[str] | None = None,
+        viewer: str | None = None,
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
 
         L0: 固定身份层
-        L1: 全库按 importance 排序 top-15（不按 wing 过滤）
+        L1: 全库按 importance 排序 top-15（不按 wing 过滤）；
+            immutable（审计）记忆无条件并入，不受 top-K 挤占
         L2: 当前查询语义触发，阈值 ≥ 0.55
         L3: 仅显式请求时触发，全量语义检索
         hybrid: True 时 L2/L3 分数 = 0.6·相似度 + 0.25·重要性 + 0.15·时间新鲜度
+        memory_types: 声明本次加载的记忆语义类型（episodic/semantic/procedural），
+            与 L0-L3 加载策略维度正交；None 表示不过滤（全部类型）。
         """
 
         # L0
@@ -938,6 +323,14 @@ class VecRecall:
 
         # L1：按 importance 取 top-K，不做向量过滤（保留原版设计）
         top_mems = self._kg.top_by_importance(wing=None, n=self.L1_TOP_K)
+        # 召回豁免：immutable（审计）记忆无条件并入 L1，
+        # 不受 top-K 挤占和强度/重要性阈值限制。
+        seen_ids = {m.id for m in top_mems}
+        immutable_extra = [m for m in self._kg.list_by_retention("immutable")
+                           if m.id not in seen_ids]
+        if immutable_extra:
+            top_mems = sorted(top_mems + immutable_extra,
+                              key=lambda m: m.importance, reverse=True)
         l1_results = [
             RetrievalResult(memory=m, score=m.importance, layer="L1")
             for m in top_mems
@@ -952,6 +345,29 @@ class VecRecall:
         l3_results: list[RetrievalResult] = []
         if load_l3 and current_query.strip():
             l3_results = self._deep_search(current_query, self.L3_TOP_K, hybrid=hybrid)
+
+        # 类型过滤：一处实现，L1/L2/L3 三层统一生效
+        if memory_types is not None:
+            allowed = set(memory_types)
+            l1_results = [r for r in l1_results if r.memory.memory_type in allowed]
+            l2_results = [r for r in l2_results if r.memory.memory_type in allowed]
+            l3_results = [r for r in l3_results if r.memory.memory_type in allowed]
+
+        # 可见性过滤（双层隔离）：private 仅 owner 可见，shared 同 wing 全员可见
+        viewer = viewer if viewer is not None else self.owner
+        if viewer:
+            l1_results = [r for r in l1_results
+                          if self._visible_to(r.memory, viewer)]
+            l2_results = [r for r in l2_results
+                          if self._visible_to(r.memory, viewer)]
+            l3_results = [r for r in l3_results
+                          if self._visible_to(r.memory, viewer)]
+
+        # 扩展钩子：召回过滤（授权/租户隔离等，只能删减）
+        if self.hooks.has("recall_filter"):
+            l1_results = self._filter_results(l1_results, viewer)
+            l2_results = self._filter_results(l2_results, viewer)
+            l3_results = self._filter_results(l3_results, viewer)
 
         # token 估算（中英混合修正：中文 ≈ 0.7 token/字）
         def count(results):
@@ -990,15 +406,20 @@ class VecRecall:
         results.sort(key=lambda x: x.score, reverse=True)
         return results[:self.L2_TOP_K]
 
-    def _deep_search(self, query: str, n: int, min_score: float = 0.0,
+    def _deep_search(self, query: str, n: int, min_score: float | None = None,
                      hybrid: bool = False) -> list[RetrievalResult]:
         """
         L3 全量语义检索：直接命中向量库，无任何过滤条件，
         召回率（R@5）由嵌入质量决定，可用 benchmarks/benchmark_recall.py 复现评测。
         hybrid=True 时对结果做 相似度+重要性+时间 融合重排（不改变召回集合）。
+
+        min_score=None（默认）不按分数过滤，始终返回 top-n。
+        余弦相似度取值 [-1, 1]：词法哈希嵌入在两段文本没有共同词时，相似度会在 0
+        附近正负波动，若默认按 0 截断，排在后面的真正答案会被直接丢掉。
         """
         vec = self._emb.embed(query)
-        raw = self._vec.query(vec, n=n, min_score=min_score)
+        threshold = float("-inf") if min_score is None else min_score
+        raw = self._vec.query(vec, n=n, min_score=threshold)
 
         ids = [r[0] for r in raw]
         scores = {r[0]: r[1] for r in raw}
@@ -1007,9 +428,12 @@ class VecRecall:
         results = []
         for mid, score in scores.items():
             if mid in mem_map:
-                s = self._hybrid_score(score, mem_map[mid]) if hybrid else score
+                m = mem_map[mid]
+                if self.owner and not self._visible_to(m, self.owner):
+                    continue  # 可见性过滤：private 记忆不泄露给非 owner
+                s = self._hybrid_score(score, m) if hybrid else score
                 results.append(RetrievalResult(
-                    memory=mem_map[mid], score=s, layer="L3"
+                    memory=m, score=s, layer="L3"
                 ))
 
         results.sort(key=lambda x: x.score, reverse=True)
@@ -1021,23 +445,94 @@ class VecRecall:
         recency = 0.5 ** (age_days / self.RECENCY_HALF_LIFE_DAYS)
         return 0.6 * sim + 0.25 * mem.importance + 0.15 * recency
 
+    def _filter_results(self, results: list[RetrievalResult],
+                        viewer: str | None = None) -> list[RetrievalResult]:
+        """对检索结果应用 recall_filter 钩子，保持原有顺序。"""
+        if not self.hooks.has("recall_filter") or not results:
+            return results
+        kept = {m.id for m in self.hooks.run_recall_filter(
+            [r.memory for r in results], viewer or self.owner)}
+        return [r for r in results if r.memory.id in kept]
+
+    def _filter_memories(self, memories: list[Memory]) -> list[Memory]:
+        if not self.hooks.has("recall_filter") or not memories:
+            return memories
+        return self.hooks.run_recall_filter(memories, self.owner)
+
+    def _visible_to(self, m: Memory, viewer: str | None) -> bool:
+        """
+        双层隔离判定：
+        - shared：同 wing 全员可见
+        - private：仅 owner 匹配可见
+        - owner 为空的记忆（老数据/未声明）：视为公开，保持旧行为
+        - viewer 为空（实例未配置 owner 的单机模式）：不过滤
+        """
+        if m.visibility == "shared" or not m.owner:
+            return True
+        if not viewer:
+            return True
+        return m.owner == viewer
+
     # ── 搜索 ──────────────────────────────────
 
-    def search(self, query: str, n: int = 10, min_score: float = 0.0,
+    def search(self, query: str, n: int = 10, min_score: float | None = None,
                hybrid: bool = False,
                acceptance_query: str | None = None) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
 
-        acceptance_query 给定时，对每条结果附加三项验收结果（同边界/同行为/
+        min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
+
+        acceptance_query 给定时，对每条结果附加三项验收（同边界/同行为/
         可执行），不改变召回和排序，调用方自行决定是否采信。
         """
         results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid)
+        results = self._filter_results(results)
         if acceptance_query is not None:
             from vecrecall.core.recall_policy import evaluate_memory
             for result in results:
                 verdict = evaluate_memory(result.memory.content, acceptance_query)
                 result.acceptance = verdict.as_dict()
         return results
+
+    def query_by_topic_key(self, prefix: str,
+                           wing: str | None = None) -> list[Memory]:
+        """
+        按分链键前缀查询记忆（通用原语）。
+
+        例：query_by_topic_key("contract:C-001") 返回该主题关联的全部记忆，
+        配合 verify_integrity(topic_key=...) 即可独立导出和验证一条审计链。
+        """
+        out: list[Memory] = []
+        for m in self._kg.list_by_topic_key_prefix(prefix, wing=wing):
+            if self.owner and not self._visible_to(m, self.owner):
+                continue
+            out.append(m)
+        return self._filter_memories(out)
+
+    def query_procedural(self, scenario_tags: list[str] | None = None,
+                         version: str | None = None) -> list[Memory]:
+        """
+        procedural 记忆精确匹配：按「场景标签 + 策略版本」检索，不走语义近似。
+
+        - strategy/规则/阈值类记忆是可版本化的策略表，检索时必须精确命中，
+          向量相似度召回对它们是错误工具（差一分的阈值不是同一个策略）。
+        - scenario_tags: 请求的标签须全部包含在记忆的标签里（子集匹配）；
+          None 表示不按标签过滤。
+        - version: 精确匹配 policy_version；None 表示任意版本。
+        """
+        out: list[Memory] = []
+        for m in self._kg.list_by_type("procedural"):
+            if self.owner and not self._visible_to(m, self.owner):
+                continue  # 可见性过滤
+            if scenario_tags:
+                mem_tags = set(m.metadata.get("scenario_tags") or [])
+                if not set(scenario_tags) <= mem_tags:
+                    continue
+            if version is not None and \
+                    m.metadata.get("policy_version") != version:
+                continue
+            out.append(m)
+        return self._filter_memories(out)
 
     # ── 遗忘曲线 ──────────────────────────────
 
@@ -1053,7 +548,8 @@ class VecRecall:
         """列出强度已跌破阈值的「已遗忘」记忆（按强度升序，最遗忘的在前）。"""
         now = time.time()
         out = [m for m in self._kg.iter_all(wing=wing)
-               if self._forgetting.is_forgotten(m, threshold, now)]
+               if m.retention_policy != "immutable"
+               and self._forgetting.is_forgotten(m, threshold, now)]
         out.sort(key=lambda m: self._forgetting.strength(m, now))
         return out
 
@@ -1080,6 +576,9 @@ class VecRecall:
         """
         groups: dict[str, list[Memory]] = {}
         for m in self._kg.iter_all(wing=wing):
+            # 豁免：immutable（审计记忆）不参与蒸馏——原始细节是不可替代的证据
+            if m.retention_policy == "immutable":
+                continue
             if m.metadata.get("distilled"):
                 continue
             if topic and m.topic != topic:
@@ -1143,7 +642,8 @@ class VecRecall:
         - graph：经图谱多跳扩展发现的关联记忆，每项含 memory / entities / paths
           （paths 记录「种子实体 → 关联实体」的关系路径，作为可解释证据）
         """
-        seeds = self._deep_search(query, n=max(n, 5), min_score=min_score)
+        seeds = self._filter_results(
+            self._deep_search(query, n=max(n, 5), min_score=min_score))
 
         seed_entities: list[str] = []
         for r in seeds:
@@ -1168,6 +668,10 @@ class VecRecall:
                     hit["paths"].append(
                         {"from": ent, "to": nb["entity"], "path": nb["path"]})
 
+        if self.hooks.has("recall_filter") and discovered:
+            kept = {m.id for m in self._filter_memories(
+                [d["memory"] for d in discovered.values()])}
+            discovered = {k: v for k, v in discovered.items() if k in kept}
         graph_hits = sorted(discovered.values(),
                             key=lambda d: d["memory"].importance, reverse=True)
         return {"query": query, "direct": seeds, "graph": graph_hits}
@@ -1203,8 +707,42 @@ class VecRecall:
 
     def link(self, source_id: str, target_id: str,
              link_type: str = "related", weight: float = 1.0) -> None:
-        """手动建立跨 wing 关联（可选）"""
+        """手动建立跨 wing 关联（可选）。跨 wing 仅对 shared 记忆开放。"""
+        src, dst = self._kg.get(source_id), self._kg.get(target_id)
+        if src is None or dst is None:
+            raise ValueError("link 的源/目标记忆不存在")
+        if src.wing != dst.wing and \
+                (src.visibility != "shared" or dst.visibility != "shared"):
+            raise ValueError(
+                "跨 wing 关联仅对 visibility=shared 的记忆开放")
         self._kg.add_link(source_id, target_id, link_type, weight)
+
+    def update_visibility(self, memory_id: str, visibility: str) -> Memory:
+        """原子操作：变更记忆可见性（private / shared）。"""
+        if visibility not in ("private", "shared"):
+            raise ValueError(f"非法 visibility: {visibility}（仅 private/shared）")
+        m = self._kg.get(memory_id)
+        if not m:
+            raise ValueError(f"记忆不存在: {memory_id}")
+        m.visibility = visibility
+        self._kg.save(m)
+        return m
+
+    def update_retention_policy(self, memory_id: str, policy: str) -> Memory:
+        """
+        原子操作：变更留存策略（decay / immutable）。
+
+        供外部编排（如契约状态机在状态迁移时调用）：
+        记忆从活跃转为不可变时调用 update_retention_policy(id, "immutable")。
+        """
+        if policy not in ("decay", "immutable"):
+            raise ValueError(f"非法 retention_policy: {policy}（仅 decay/immutable）")
+        m = self._kg.get(memory_id)
+        if not m:
+            raise ValueError(f"记忆不存在: {memory_id}")
+        m.retention_policy = policy
+        self._kg.save(m)
+        return m
 
     # ── 生命周期管理 ──────────────────────────
 
@@ -1242,6 +780,7 @@ class VecRecall:
             return False
         self._vec.delete(memory_id)
         self._kg.delete(memory_id)
+        self.hooks.run_on_delete(memory_id)
         return True
 
     def prune(self, min_importance: float | None = None,
@@ -1263,6 +802,10 @@ class VecRecall:
         now = time.time()
         victims: list[Memory] = []
         for m in self._kg.iter_all(wing=wing):
+            # 豁免：immutable（审计记忆）永不被 prune——审批决策、证据链
+            # 不能因为「很久没复习」或「importance 低」被清理掉。
+            if m.retention_policy == "immutable":
+                continue
             if use_forgetting:
                 if self._forgetting.is_forgotten(m, strength_threshold, now):
                     victims.append(m)
@@ -1294,15 +837,19 @@ class VecRecall:
 
     # ── 防篡改验证（可选区块链）──────────────
 
-    def verify_integrity(self, wing: str | None = None) -> dict:
-        """验证哈希链完整性，检测记忆原文是否被篡改"""
+    def verify_integrity(self, wing: str | None = None,
+                         topic_key: str = "") -> dict:
+        """
+        验证哈希链完整性，检测记忆原文是否被篡改。
+        topic_key 非空时只验证 (wing, topic_key) 子链（如单个契约的审计链）。
+        """
         if self._chain is None:
             return {"enabled": False,
                     "message": "区块链未启用（构造时 use_blockchain=True 开启）"}
         wings = [wing] if wing else (self._kg.list_wings() or [self.wing])
         results = {}
         for w in wings:
-            ok, msg = self._chain.verify_chain(w)
+            ok, msg = self._chain.verify_chain(w, topic_key)
             results[w] = {"valid": ok, "message": msg}
         return {"enabled": True, "wings": results}
 

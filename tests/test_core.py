@@ -10,6 +10,7 @@ VecRecall — 测试套件
 
 import sys
 import os
+import json
 import tempfile
 import math
 import threading
@@ -26,7 +27,7 @@ if sys.stderr.encoding and sys.stderr.encoding.upper() not in ('UTF-8', 'UTF8'):
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from vecrecall.core.engine import (
-    VecRecall, Memory, NumpyVectorBackend, SqliteVectorBackend,
+    VecRecall, Memory, KnowledgeGraph, NumpyVectorBackend, SqliteVectorBackend,
     HashEmbeddingBackend, BagOfWordsEmbeddingBackend,
     OllamaEmbeddingBackend, APIEmbeddingBackend,
     build_embedding_backend, memory_to_dict,
@@ -909,6 +910,547 @@ def test_at_rest_encryption():
         p3.close()
 
 
+def test_typed_memory_migration():
+    """阶段 A：memory_type/visibility/owner/retention_policy 新字段 + 老库 migration"""
+    import sqlite3
+    print("\n── 阶段 A：类型化/隔离/留存字段 + migration ──")
+    with tempfile.TemporaryDirectory() as d:
+        # 1. 新写入：新字段可设置并持久化
+        p = make_palace(d)
+        m = p.add(
+            content="付款审批决策:金额 50000,供应商 A,审批人 B",
+            topic="audit",
+            memory_type="episodic",
+            visibility="private",
+            owner="agent-1",
+            retention_policy="immutable",
+        )
+        test("memory_type 可写入", m.memory_type == "episodic")
+        test("visibility 可写入", m.visibility == "private")
+        test("owner 可写入", m.owner == "agent-1")
+        test("retention_policy 可写入", m.retention_policy == "immutable")
+
+        # 2. 默认值
+        m2 = p.add(content="普通对话记忆", topic="chat")
+        test("默认 memory_type=episodic", m2.memory_type == "episodic")
+        test("默认 visibility=private", m2.visibility == "private")
+        test("默认 owner 为空", m2.owner == "")
+        test("默认 retention_policy=decay", m2.retention_policy == "decay")
+        p.close()
+
+        # 3. 重启后持久化读回
+        p2 = make_palace(d)
+        got = p2._kg.get(m.id)
+        test("重启后 memory_type 读回", got.memory_type == "episodic")
+        test("重启后 retention_policy 读回", got.retention_policy == "immutable")
+        test("重启后 owner 读回", got.owner == "agent-1")
+
+        # 4. 序列化透出
+        dd = memory_to_dict(got)
+        test("memory_to_dict 含 memory_type", dd.get("memory_type") == "episodic")
+        test("memory_to_dict 含 visibility", dd.get("visibility") == "private")
+        test("memory_to_dict 含 retention_policy",
+             dd.get("retention_policy") == "immutable")
+        p2.close()
+
+        # 5. 老库 migration：手工建 9 列旧结构表，打开后自动补列
+        old_db = os.path.join(d, "old_memories.db")
+        conn = sqlite3.connect(old_db)
+        conn.executescript("""
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            wing TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            session_id TEXT NOT NULL,
+            importance REAL DEFAULT 0.5,
+            ui_summary TEXT DEFAULT '',
+            metadata TEXT DEFAULT '{}'
+        );
+        """)
+        conn.execute(
+            "INSERT INTO memories VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("old-1", "w", "t", "老记忆内容", 1234567890.0, "s", 0.7, "", "{}"),
+        )
+        conn.commit()
+        conn.close()
+
+        kg = KnowledgeGraph(old_db)
+        got_old = kg.get("old-1")
+        test("老库迁移后可读取", got_old is not None and got_old.content == "老记忆内容")
+        test("老记录默认 memory_type", got_old.memory_type == "episodic")
+        test("老记录默认 visibility", got_old.visibility == "private")
+        test("老记录默认 retention_policy", got_old.retention_policy == "decay")
+        # 迁移后新写入也应正常
+        new_mem = Memory.create(wing="w", topic="t", content="迁移后新写入")
+        kg.save(new_mem)
+        test("迁移后新写入成功", kg.get(new_mem.id) is not None)
+        kg.close()
+
+
+def test_immutable_exemption():
+    """阶段 B：retention_policy=immutable 豁免去重/遗忘/prune/蒸馏，始终可召回"""
+    print("\n── 阶段 B：审计记忆豁免（immutable）──")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        p._extractor = HeuristicExtractor()
+
+        # 1. 去重豁免：语义高度相似的两笔审计记忆各存各的
+        m1 = p.add(content="付款审批决策:金额 50000 元,供应商 A,审批人 B",
+                   topic="audit", retention_policy="immutable")
+        m2 = p.add(content="付款审批决策:金额 50001 元,供应商 A,审批人 B",
+                   topic="audit", retention_policy="immutable")
+        test("immutable 记忆不合并(1)", m1.id != m2.id)
+        test("immutable 记忆不合并(2)", m2.metadata.get("occurrences", 1) == 1)
+
+        # 对照组：decay 记忆语义相似应被去重合并
+        c1 = p.add(content="用户喜欢在早晨阅读科技新闻", topic="chat")
+        c2 = p.add(content="用户喜欢在早晨阅读科技新闻", topic="chat")
+        test("对照组 decay 记忆仍去重合并", c1.id == c2.id)
+        p.close()
+
+        # 2. 重启后验证独立持久化
+        p = make_palace(d)
+        got1 = p._kg.get(m1.id)
+        got2 = p._kg.get(m2.id)
+        test("两条审计记忆独立存在",
+             got1 is not None and got2 is not None
+             and got1.content != got2.content)
+
+        # 3. 遗忘豁免：把 last_review 拨到很久以前，decay 记忆会被遗忘，immutable 不会
+        old_ts = time.time() - 86400 * 365  # 一年前
+        decay_mem = p.add(content="随时间衰减的普通聊天记忆", topic="chat",
+                          importance=0.1)
+        for mem_id in (m1.id, decay_mem.id):
+            mem = p._kg.get(mem_id)
+            mem.timestamp = old_ts
+            mem.metadata["last_review"] = old_ts
+            p._kg.save(mem)
+        forgotten = {m.id for m in p.forgotten(threshold=0.2)}
+        test("decay 记忆会进入已遗忘", decay_mem.id in forgotten)
+        test("immutable 记忆不被标记已遗忘", m1.id not in forgotten)
+
+        # 4. prune 豁免：低 importance + 超龄都不能删掉 immutable
+        victims = p.prune(min_importance=0.5, older_than_days=30,
+                          dry_run=False)
+        victim_ids = {m.id for m in victims}
+        test("decay 记忆被 prune", decay_mem.id in victim_ids)
+        test("immutable 记忆不被 prune", m1.id not in victim_ids)
+        test("immutable 记忆仍在库", p._kg.get(m1.id) is not None)
+
+        # 5. 蒸馏豁免：同 topic 下 immutable 不进蒸馏分组
+        for i in range(4):
+            p.add(content=f"审批流水记录第 {i} 号", topic="audit",
+                  retention_policy="immutable", importance=0.3)
+        # 对照组：同 topic 且彼此语义可区分（过近会被去重合并，凑不满 min_cluster）
+        chat_fragments = [
+            "今天早上的地铁人很多很拥挤",
+            "中午吃的外卖送达时间有点晚",
+            "下午的会议持续了两个小时",
+            "晚上散步经过新开的咖啡店",
+        ]
+        for c in chat_fragments:
+            p.add(content=c, topic="chat", importance=0.3)
+        plans = p.distill(topic="audit", dry_run=True)
+        test("immutable topic 无蒸馏计划", len(plans) == 0)
+        plans_chat = p.distill(topic="chat", dry_run=True)
+        test("对照组 decay topic 有蒸馏计划", len(plans_chat) >= 1)
+
+        # 6. 召回豁免：immutable 记忆无条件进 L1（低 importance 也不被挤掉）
+        bundle = p.build_context()
+        l1_ids = {r.memory.id for r in bundle.l1_key_moments}
+        test("immutable 记忆始终在 L1", m1.id in l1_ids)
+        p.close()
+
+
+def test_typed_memory_routing():
+    """阶段 C：memory_type 路由——semantic 强制入图 / procedural 精确匹配 / 类型过滤"""
+    print("\n── 阶段 C：类型化记忆 + 检索过滤 ──")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)  # 无 extractor，验证 semantic 兜底抽取
+
+        # 1. semantic：无 extractor 也强制走时序图谱
+        sem = p.add(content="供应商 Acme 于 2026 年 3 月进入合格名录",
+                    topic="knowledge", memory_type="semantic")
+        test("semantic 记忆可写入", sem.memory_type == "semantic")
+        test("semantic 记忆实体入图", p.entity("Acme") is not None)
+
+        # 2. procedural：场景标签 + 版本写入 metadata
+        proc = p.add(content="付款超过 50000 元需双人复核",
+                     topic="policy", memory_type="procedural",
+                     scenario_tags=["payment", "gatekeeping"],
+                     policy_version="v1")
+        test("procedural 标签已写入",
+             proc.metadata.get("scenario_tags") == ["payment", "gatekeeping"])
+        test("procedural 版本已写入",
+             proc.metadata.get("policy_version") == "v1")
+
+        # 3. query_procedural：标签子集匹配 + 版本精确匹配
+        p.add(content="审批超过 100000 元需三级会签",
+              topic="policy", memory_type="procedural",
+              scenario_tags=["approval", "gatekeeping"], policy_version="v1")
+        p.add(content="付款超过 80000 元需双人复核（旧版规则）",
+              topic="policy", memory_type="procedural",
+              scenario_tags=["payment"], policy_version="v0")
+
+        hits = p.query_procedural(scenario_tags=["gatekeeping"])
+        test("按场景标签命中两条", len(hits) == 2)
+        hits = p.query_procedural(scenario_tags=["payment"], version="v1")
+        test("标签+版本精确命中", len(hits) == 1 and "50000" in hits[0].content)
+        hits = p.query_procedural(scenario_tags=["nonexistent"])
+        test("无命中返回空", len(hits) == 0)
+        hits = p.query_procedural(version="v0")
+        test("仅按版本命中", len(hits) == 1)
+
+        # 4. episodic 记忆不进 procedural 检索
+        p.add(content="一次普通的付款审批记录", topic="audit")
+        test("episodic 不混入 procedural 检索",
+             all(m.memory_type == "procedural"
+                 for m in p.query_procedural(scenario_tags=None)))
+
+        # 5. build_context 按类型过滤（L1/L2/L3 统一生效）
+        for i in range(6):
+            p.add(content=f"日常闲聊话题 {i}：今天聊到天气和午饭",
+                  topic="chat", importance=0.9)  # 高 importance 占据 L1
+        bundle_all = p.build_context()
+        test("默认不过滤：各类型都在 L1",
+             {r.memory.memory_type for r in bundle_all.l1_key_moments}
+             >= {"episodic", "semantic", "procedural"})
+
+        bundle_sem = p.build_context(memory_types=["semantic"])
+        l1_types = {r.memory.memory_type for r in bundle_sem.l1_key_moments}
+        test("声明 semantic 后 L1 只含 semantic", l1_types == {"semantic"})
+        test("声明 semantic 后 L2 只含 semantic",
+             {r.memory.memory_type for r in bundle_sem.l2_topic_context}
+             <= {"semantic"})
+        p.close()
+
+
+def test_visibility_isolation():
+    """阶段 D：visibility/owner 双层隔离 + 原子操作 + 跨 wing link 限制"""
+    print("\n── 阶段 D：双层隔离 ──")
+    with tempfile.TemporaryDirectory() as d:
+        # 隔离测试用持久化向量后端（Numpy 是内存后端，跨实例不共享；
+        # Chroma 在 Windows 下文件句柄会卡住临时目录清理，故用 SQLite）
+        from pathlib import Path
+        vec_db = str(Path(d) / "vectors.db")
+
+        def palace(wing_owner: str) -> VecRecall:
+            return VecRecall(
+                base_dir=d, wing="test-project", owner=wing_owner,
+                embedding_backend=BagOfWordsEmbeddingBackend(),
+                vector_backend=SqliteVectorBackend(vec_db),
+            )
+
+        # owner=A 写入：一条 private 一条 shared
+        pa = palace("agent-A")
+        priv = pa.add(content="A 的私有策略思考:阈值应设为 0.3",
+                      topic="policy", owner="agent-A",
+                      memory_type="procedural",
+                      scenario_tags=["gatekeeping"], policy_version="v1")
+        shared = pa.add(content="共享知识:供应商 Acme 合格",
+                        topic="knowledge", visibility="shared",
+                        owner="agent-A", memory_type="semantic")
+
+        # owner=B 的实例查 A 的记忆
+        pb = palace("agent-B")
+
+        # 1. search 不可见 private，可见 shared
+        res_b = pb.search("私有策略思考 阈值")
+        test("B 搜不到 A 的 private 记忆",
+             all(r.memory.id != priv.id for r in res_b))
+        res_b2 = pb.search("供应商 Acme 合格")
+        test("B 能搜到 shared 记忆",
+             any(r.memory.id == shared.id for r in res_b2))
+
+        # 2. query_procedural 同样隔离
+        test("B 的 procedural 查询不含 A 的 private",
+             all(m.id != priv.id for m in
+                 pb.query_procedural(scenario_tags=["gatekeeping"])))
+
+        # 3. build_context 隔离（L1/L2/L3）
+        bundle_b = pb.build_context(current_query="策略 阈值 供应商",
+                                    load_l2=True, load_l3=True)
+        all_b_ids = ({r.memory.id for r in bundle_b.l1_key_moments}
+                     | {r.memory.id for r in bundle_b.l2_topic_context}
+                     | {r.memory.id for r in bundle_b.l3_deep_results})
+        test("B 的上下文不含 private", priv.id not in all_b_ids)
+        test("B 的上下文含 shared", shared.id in all_b_ids)
+        pb.close()
+
+        # 4. owner=A 自己可见自己的 private
+        bundle_a = pa.build_context(load_l2=True, load_l3=True)
+        all_a_ids = ({r.memory.id for r in bundle_a.l1_key_moments}
+                     | {r.memory.id for r in bundle_a.l2_topic_context}
+                     | {r.memory.id for r in bundle_a.l3_deep_results})
+        test("A 自己可见自己的 private", priv.id in all_a_ids)
+
+        # 5. 原子操作：update_visibility 后 B 可见
+        pa.update_visibility(priv.id, "shared")
+        pb2 = palace("agent-B")
+        res = pb2.search("私有策略思考 阈值")
+        test("update_visibility 后 B 可见",
+             any(r.memory.id == priv.id for r in res))
+        pb2.close()
+
+        # 6. 原子操作：update_retention_policy
+        proc = pa._kg.get(priv.id)
+        test("初始为 decay", proc.retention_policy == "decay")
+        pa.update_retention_policy(priv.id, "immutable")
+        test("转 immutable 后豁免 prune",
+             all(m.id != priv.id for m in
+                 pa.prune(min_importance=0.99, dry_run=True)))
+        # 非法值拒绝
+        try:
+            pa.update_retention_policy(priv.id, "bogus")
+            test("非法 retention_policy 被拒绝", False)
+        except ValueError:
+            test("非法 retention_policy 被拒绝", True)
+        try:
+            pa.update_visibility(priv.id, "bogus")
+            test("非法 visibility 被拒绝", False)
+        except ValueError:
+            test("非法 visibility 被拒绝", True)
+
+        # 7. 跨 wing link：非 shared 拒绝，双方 shared 允许
+        other = palace("agent-A")
+        other_mem = other.add(content="另一个 wing 的记忆",
+                              topic="misc", wing="other-wing")
+        try:
+            pa.link(shared.id, other_mem.id)
+            test("跨 wing link 对 private 目标拒绝", False)
+        except ValueError:
+            test("跨 wing link 对 private 目标拒绝", True)
+        other.update_visibility(other_mem.id, "shared")
+        pa.link(shared.id, other_mem.id)
+        test("跨 wing link 双方 shared 允许", True)
+        other.close()
+        pa.close()
+
+
+def test_topic_key_chains():
+    """阶段 E：哈希链按 topic_key 分链——独立验证 + 向后兼容"""
+    print("\n── 阶段 E：哈希链分链 ──")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d, use_blockchain=True)
+
+        # 1. 两条不同 topic_key 的审计记忆 → 两条独立子链
+        c1 = p.add(content="契约 C-001 决策一:批准付款 50000",
+                   topic="audit", retention_policy="immutable",
+                   topic_key="contract:C-001")
+        c2 = p.add(content="契约 C-002 决策一:驳回付款 30000",
+                   topic="audit", retention_policy="immutable",
+                   topic_key="contract:C-002")
+        # 同一契约第二条决策 → 同一条子链
+        c3 = p.add(content="契约 C-001 决策二:批准付款 20000",
+                   topic="audit", retention_policy="immutable",
+                   topic_key="contract:C-001")
+
+        test("记忆携带 topic_key", c1.topic_key == "contract:C-001")
+        test("memory_to_dict 透出 topic_key",
+             memory_to_dict(c1)["topic_key"] == "contract:C-001")
+
+        # 2. 子链独立验证
+        ok1, msg1 = p._chain.verify_chain("test-project", "contract:C-001")
+        ok2, msg2 = p._chain.verify_chain("test-project", "contract:C-002")
+        test("C-001 子链完整", ok1 and "2 个区块" in msg1)
+        test("C-002 子链完整", ok2 and "1 个区块" in msg2)
+
+        # 3. 分链互不影响：两条链各自从 GENESIS 起链
+        b1 = p._chain.get_blocks_by_topic("test-project", "contract:C-001")
+        b2 = p._chain.get_blocks_by_topic("test-project", "contract:C-002")
+        test("C-001 链有 2 个区块", len(b1) == 2)
+        test("C-002 链有 1 个区块", len(b2) == 1)
+        test("两条子链首块都从创世起链",
+             b1[0].prev_hash == "0" * 64 and b2[0].prev_hash == "0" * 64)
+        test("同链第二块链接首块", b1[1].prev_hash == b1[0].hash)
+
+        # 4. 引擎级验证接口
+        res = p.verify_integrity(wing="test-project", topic_key="contract:C-001")
+        test("verify_integrity 子链验证通过",
+             res["wings"]["test-project"]["valid"] is True)
+
+        # 5. 记忆内容篡改检测：改库里的原文后子链哈希不再匹配内容
+        #    （链防的是链上原文被改；这里只验证区块内容与库内原文可对照）
+        got = p._kg.get(c1.id)
+        test("链上区块内容与记忆原文一致",
+             p._chain.get_blocks_by_topic("test-project", "contract:C-001")[0]
+             .content == got.content)
+        p.close()
+
+        # 6. 向后兼容：老库（无 topic_key 列）打开后默认链可验证
+        import sqlite3
+        old_db = os.path.join(d, "old_chain.db")
+        conn = sqlite3.connect(old_db)
+        conn.execute("""
+        CREATE TABLE blocks (
+            block_id TEXT PRIMARY KEY, idx INTEGER NOT NULL, timestamp REAL NOT NULL,
+            prev_hash TEXT NOT NULL, content TEXT NOT NULL, token_count INTEGER DEFAULT 0,
+            keywords TEXT DEFAULT '[]', date_label TEXT NOT NULL, wing TEXT NOT NULL,
+            session_id TEXT NOT NULL, trigger TEXT DEFAULT 'manual',
+            hash TEXT NOT NULL, group_id TEXT DEFAULT '', metadata TEXT DEFAULT '{}'
+        )
+        """)
+        conn.commit()
+        conn.close()
+
+        from vecrecall.blockchain import BlockChain
+        chain = BlockChain(old_db)  # migration 补列
+        blk = chain.new_block(content="老链上的区块", wing="old-wing")
+        ok, msg = chain.verify_chain("old-wing")
+        test("老库 migration 后默认链可写可验", ok)
+        test("默认链 topic_key 为空", blk.metadata.get("topic_key", "") == "")
+        chain.close()
+
+
+
+def test_search_returns_topn_with_negative_scores():
+    """回归：词法嵌入的余弦相似度可以为负，search 默认不能按 0 截断。
+
+    LongMemEval 样例「What breed is my dog?」暴露的问题：只有 4 条记忆、取 top-5，
+    答案却没出现，因为答案的相似度是 -0.024，被默认 min_score=0.0 丢掉了。
+    """
+    print("\n── 回归：负相似度不被截断 ──")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        # 与 benchmarks/longmemeval_sample.json 的 sample_ssu_1 完全一致（含助手轮次），
+        # 去掉助手轮次后相似度不再为负，复现不了问题
+        docs = [
+            "user: Can you suggest a quick pasta recipe for dinner?\n"
+            "assistant: Try garlic butter spaghetti with parmesan.",
+            "user: I just adopted a golden retriever puppy named Max, any training tips?\n"
+            "assistant: Start with crate training and short sessions of basic commands.",
+            "user: What is the capital of Australia?\nassistant: Canberra.",
+            "user: Help me plan a weekend hiking trip near the mountains.\n"
+            "assistant: Pack water, layers and check the trail map.",
+        ]
+        ids = [p.add(x, dedup=False).id for x in docs]
+        q = "What breed is my dog?"
+        raw = p._vec.query(p._emb.embed(q), n=10, min_score=float("-inf"))
+        test("样例中确有负相似度", any(s < 0 for _, s, _ in raw),
+             str([round(s, 3) for _, s, _ in raw]))
+
+        res = p.search(q, n=5)
+        test("默认 search 返回全部 4 条", len(res) == 4, str(len(res)))
+        test("答案记忆在结果中", ids[1] in [r.memory.id for r in res])
+
+        res_thr = p.search(q, n=5, min_score=0.0)
+        test("显式 min_score=0.0 仍可截断", all(r.score >= 0.0 for r in res_thr))
+
+        ctx = p.build_context(current_query=q, load_l2=False, load_l3=True)
+        test("L3 也返回全部 4 条", len(ctx.l3_deep_results) == 4)
+        p.close()
+
+
+def test_extension_hooks():
+    """v2.2：扩展钩子（企业版扩展包的挂载点），默认不改变行为"""
+    print("\n── 扩展钩子 ──")
+    from vecrecall.core.hooks import HookRegistry, HOOK_POINTS
+    import vecrecall.core.engine as eng_mod
+    from vecrecall.core import models, vectors, embeddings, storage
+    test("拆分后 engine 仍导出 Memory", eng_mod.Memory is models.Memory)
+    test("拆分后 engine 仍导出 SqliteVectorBackend",
+         eng_mod.SqliteVectorBackend is vectors.SqliteVectorBackend)
+    test("拆分后 engine 仍导出 build_embedding_backend",
+         eng_mod.build_embedding_backend is embeddings.build_embedding_backend)
+    test("拆分后 engine 仍导出 KnowledgeGraph",
+         eng_mod.KnowledgeGraph is storage.KnowledgeGraph)
+    test("四个调用点", set(HOOK_POINTS) ==
+         {"before_write", "after_write", "recall_filter", "on_delete"})
+
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        test("默认无钩子", not any(p.hooks.has(x) for x in HOOK_POINTS))
+
+        # before_write：改写字段
+        def tag(fields):
+            fields["metadata"]["tenant"] = "t1"
+            return fields
+        p.hooks.register("before_write", tag)
+        m = p.add("钩子写入测试：before_write 改写 metadata", dedup=False)
+        test("before_write 可改写字段", m.metadata.get("tenant") == "t1")
+
+        # before_write：抛异常拒绝写入
+        def deny(fields):
+            if "禁止" in fields["content"]:
+                raise PermissionError("denied")
+        p.hooks.register("before_write", deny)
+        try:
+            p.add("这条内容禁止写入", dedup=False)
+            test("before_write 可拒绝写入", False)
+        except PermissionError:
+            test("before_write 可拒绝写入", True)
+        test("被拒绝的内容未落库",
+             all("禁止" not in x.content for x in p._kg.iter_all()))
+        p.hooks.unregister("before_write", deny)
+        p.hooks.unregister("before_write", tag)
+
+        # after_write：审计 sink，含去重合并
+        log = []
+        p.hooks.register("after_write", lambda mem, merged: log.append((mem.id, merged)))
+        a = p.add("after_write 审计 sink 测试内容")
+        b = p.add("after_write 审计 sink 测试内容")
+        test("after_write 新增时触发", log and log[0] == (a.id, False))
+        test("after_write 合并时 merged=True", len(log) == 2 and log[1] == (b.id, True))
+
+        # recall_filter：只能删减
+        p.add("机密项目 Alpha 的预算", dedup=False)
+        p.add("公开项目 Beta 的预算", dedup=False)
+        before = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("过滤前能搜到机密", any("Alpha" in c for c in before))
+
+        def hide_alpha(memories, viewer):
+            return [x for x in memories if "Alpha" not in x.content]
+        p.hooks.register("recall_filter", hide_alpha)
+        after = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("recall_filter 作用于 search", not any("Alpha" in c for c in after))
+        test("recall_filter 保留其余结果", any("Beta" in c for c in after))
+        ctx = p.build_context(current_query="项目 预算", load_l3=True)
+        allc = [r.memory.content for r in
+                ctx.l1_key_moments + ctx.l2_topic_context + ctx.l3_deep_results]
+        test("recall_filter 作用于 build_context", not any("Alpha" in c for c in allc))
+
+        def inject(memories, viewer):
+            fake = models.Memory.create(wing="x", topic="x", content="伪造记忆")
+            return memories + [fake]
+        p.hooks.register("recall_filter", inject)
+        after2 = [r.memory.content for r in p.search("项目 预算", n=10)]
+        test("recall_filter 不能新增结果", "伪造记忆" not in after2)
+
+        # on_delete
+        deleted = []
+        p.hooks.register("on_delete", deleted.append)
+        p.delete(a.id)
+        test("on_delete 触发", deleted == [a.id])
+
+        # 插件对象
+        class Plugin:
+            def register(self, registry):
+                registry.register("after_write", lambda mem, merged: None)
+        reg = HookRegistry()
+        reg.install(Plugin())
+        test("插件对象可安装", reg.has("after_write"))
+        try:
+            reg.register("no_such_point", lambda: None)
+            test("未知调用点被拒绝", False)
+        except ValueError:
+            test("未知调用点被拒绝", True)
+        p.close()
+
+def test_core_has_no_scenario_schema():
+    """核心无场景 schema：契约等业务适配器属于企业扩展包，核心源码不得出现。"""
+    print("\n── 核心边界守护 ──")
+    root = os.path.dirname(os.path.dirname(__file__))
+    for rel in [("vecrecall", "core", "engine.py"), ("vecrecall", "mcp", "server.py"),
+                ("vecrecall", "api", "server.py")]:
+        src = open(os.path.join(root, *rel), encoding="utf-8").read()
+        name = "/".join(rel)
+        test(f"{name} 不含 contract_id", "contract_id" not in src)
+        test(f"{name} 不引用 adapters", "vecrecall.adapters" not in src)
+    test("核心包不含 adapters 目录",
+         not os.path.isdir(os.path.join(root, "vecrecall", "adapters")))
+
 def run_all():
     print("=" * 50)
     print("VecRecall — 测试套件")
@@ -942,6 +1484,14 @@ def run_all():
     test_forgetting_and_distill()
     test_graph_search()
     test_at_rest_encryption()
+    test_typed_memory_migration()
+    test_immutable_exemption()
+    test_typed_memory_routing()
+    test_visibility_isolation()
+    test_topic_key_chains()
+    test_search_returns_topn_with_negative_scores()
+    test_extension_hooks()
+    test_core_has_no_scenario_schema()
 
     print("\n" + "=" * 50)
     total = PASS + FAIL

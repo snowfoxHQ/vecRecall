@@ -12,6 +12,32 @@ VecRecall 已经形成一个边界清晰的本地优先原型：Python API、CLI
 
 **建议定位：** 保持个人开发者和小团队可自托管的 agent memory toolkit；先把本地数据正确性与隔离做扎实，再把检索做成可测量、可解释、可配置，最后拓展多租户部署和集成生态。不要在隔离、恢复和评测仍不完整时宣称“生产级”或使用未经可比验证的市场优越性话术。
 
+### 实施状态更新（2026-11-25，v2.2）
+
+v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补上公开评测与扩展钩子。对本计划各项的影响：
+
+| 本计划条目 | 状态 | 处理方式 |
+|---|---|---|
+| 发现 2：wing 不是隔离边界，需 namespace / scoped 检索 | **基本解决** | `visibility`（private/shared）+ `owner` 双层隔离，L1/L2/L3、图谱扩展、procedural 查询统一按可见性过滤；跨 wing 关联只对 shared 开放；另提供 `recall_filter` 钩子供外部做授权。**残留**：去重候选池仍跨 owner |
+| 记忆类型（semantic / episodic / procedural） | **已解决** | `memory_type` 落地；semantic 必进图谱；procedural 按场景标签 + 版本精确匹配；`build_context(memory_types=...)` 类型过滤 |
+| 发现 8：遗忘曲线不影响默认检索 | **部分解决** | `retention_policy=immutable` 的记忆不遗忘、不 prune，始终进 L1；常规记忆的强度仍不参与默认排序 |
+| 哈希链 → 审计 | **部分解决** | 按 `(wing, topic_key)` 分链，单主题证据可独立验证导出；仍不是跨库事务 |
+| 发现 15：质量体系（基准规模小、无 CI、测试非 pytest） | **部分解决** | 基准部分：新增 LongMemEval 检索评测（`benchmarks/longmemeval.py`），指标含 Recall / nDCG / MRR / 延迟。词法嵌入全量基线：会话级 R_any@5 75.3%、R_any@10 84.9%、R_all@10 61.7%，详见 `benchmarks/results/`。**仍缺**：CI、pytest 化、置信区间 |
+| 发现 16：公开文档承诺需校准 | **已解决** | README 召回率改用 LongMemEval 数字，内置评测标注为冒烟测试 |
+| 可扩展性 | **新增能力** | `core/hooks.py`：`before_write` / `after_write` / `recall_filter` / `on_delete`，支持 entry point 插件 |
+| 代码结构 | **改善** | `engine.py` 拆为 models / vectors / embeddings / storage / engine，旧导入保持兼容 |
+
+**评测发现的新问题：**
+
+1. **检索丢弃负分结果（已修复）**：余弦相似度可以为负，旧版 `search()` 默认按 0 截断，会把排在后面的真正答案丢掉。现在默认始终返回 top-n。
+2. **hybrid 的时间新鲜度按当前时间计算（未处理）**：记忆都较旧时（LongMemEval 的会话在 2023 年），新鲜度全部接近 0，hybrid 与纯向量排名完全相同。应改为以查询时刻为基准。
+3. **召回上下文过大（未处理）**：整段会话存为一条记忆时，top-5 结果约 13,900 token，远超四层栈「每次几百 token」的设计。需要更细的写入粒度或会话内片段检索。
+4. **偏好类题目召回低（未处理）**：LongMemEval 的 single-session-preference 只有 26.7%，词法嵌入无法匹配语义相近、用词不同的表述，待语义嵌入与混合检索验证。
+
+**仍开放**：发现 1（加密覆盖范围）、3（删除非级联）、4（跨存储部分成功）、5/6/7（索引 fingerprint、SQLite 向量全库扫描、hybrid 无 BM25）、11/12/13（REST 认证收紧、请求体校验、密钥生命周期）、14（MCP / REST / CLI 能力入口不一致）、15 中的 CI 与 pytest 化、immutable 记忆无限增长需冷存储归档。
+
+回归：test_core 257/257、test_blockchain 72/72、test_governance 58/58、test_recall_policy 19/19、test_repo_map 14/14。
+
 ### 实施状态更新（2026-11-21，v2.1）
 
 参考 MemoraX Code 的三类治理机制，本轮落地了以下能力（均为可选/增量，不改变既有默认行为）：
