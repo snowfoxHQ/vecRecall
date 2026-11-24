@@ -1,10 +1,10 @@
 # VecRecall v2.2
 
 [![版本](https://img.shields.io/badge/version-2.2.0-blue)](https://github.com/snowfoxHQ/vecRecall)
-[![许可证](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![许可证](https://img.shields.io/badge/license-MIT-green)](https://github.com/snowfoxHQ/vecRecall/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-brightgreen)](https://python.org)
 
-> 完整版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+> 完整版本记录见 [CHANGELOG.md](https://github.com/snowfoxHQ/vecRecall/blob/main/CHANGELOG.md)。English: [README_EN.md](https://github.com/snowfoxHQ/vecRecall/blob/main/README_EN.md)
 
 认知记忆系统，也可作为多 Agent 的记忆运行时。基于对原版 MemPalace 的设计分析重新构建，v2.0 新增 **LLM 认知层**（写入时自动抽取实体/关系/摘要/话题 + 语义去重合并）、**时序知识图谱**、**遗忘曲线与主动蒸馏**、**多跳向量+图谱混合检索**、**静态加密（at-rest）**、**语义嵌入升级**（subword 增强词法 + 多语言语义模型）。
 
@@ -275,7 +275,7 @@ v2.0 的嵌入分两层。v2.2 起以公开基准 [LongMemEval](https://github.c
 | 词法（`bow`，默认零依赖） | 75.3% | 84.9% | 76.2% | 无 |
 | 语义（`sentence`，多语言 MiniLM） | 待测 | 待测 | 100% | `pip install -e ".[sentence]"` |
 
-LongMemEval-S：470 道题（按官方做法跳过 30 道拒答题），每题约 48 个会话，每个会话一条记忆，纯向量检索，只评检索、不评问答。按题型的结果与运行方法见 [benchmarks/README.md](benchmarks/README.md)，原始结果在 `benchmarks/results/`。
+LongMemEval-S：470 道题（按官方做法跳过 30 道拒答题），每题约 48 个会话，每个会话一条记忆，纯向量检索，只评检索、不评问答。按题型的结果与运行方法见 [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md)，原始结果在 [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results)。
 
 - **零依赖词法增强**：`BagOfWordsEmbeddingBackend` 从「整词 + 中文二元组」升级为「整词 + 英文字符 3/4-gram（subword）+ 中文三元组」，可捕获词形变化（running/run）与拼写变体（database/databases），无需任何外部依赖。
 - **语义模型多语言化**：`sentence` / `auto` 默认模型从英文 `all-MiniLM-L6-v2` 升级为多语言 `paraphrase-multilingual-MiniLM-L12-v2`（中文友好），可用 `--embed-model` 覆盖。

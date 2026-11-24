@@ -1,8 +1,8 @@
-[中文](README.md) | **English**
+[中文](https://github.com/snowfoxHQ/vecRecall/blob/main/README.md) | **English**
 
 # VecRecall v2.2
 
-> Full release history: [CHANGELOG.md](CHANGELOG.md).
+> Full release history: [CHANGELOG.md](https://github.com/snowfoxHQ/vecRecall/blob/main/CHANGELOG.md).
 
 A cognitive memory system that also works as a memory runtime for multi-agent setups. Rebuilt from a design analysis of the original MemPalace, v2.0 adds an **LLM cognitive layer** (automatic entity / relation / summary / topic extraction on write + semantic dedup & merge), a **temporal knowledge graph**, **forgetting curves & active distillation**, **multi-hop vector+graph hybrid retrieval**, **at-rest encryption**, and a **semantic embedding upgrade** (subword-augmented lexical + multilingual semantic model).
 
@@ -273,7 +273,7 @@ v2.0's embedding has two tiers. Since v2.2 the public benchmark [LongMemEval](ht
 | Lexical (`bow`, default, zero-dependency) | 75.3% | 84.9% | 76.2% | None |
 | Semantic (`sentence`, multilingual MiniLM) | TBD | TBD | 100% | `pip install -e ".[sentence]"` |
 
-LongMemEval-S: 470 questions (the 30 abstention questions are skipped, as in the official setup), about 48 sessions per question, one memory per session, pure vector retrieval; retrieval only, no QA scoring. Per-type results and instructions are in [benchmarks/README.md](benchmarks/README.md); raw results are in `benchmarks/results/`.
+LongMemEval-S: 470 questions (the 30 abstention questions are skipped, as in the official setup), about 48 sessions per question, one memory per session, pure vector retrieval; retrieval only, no QA scoring. Per-type results and instructions are in [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md); raw results are in [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results).
 
 - **Zero-dependency lexical enhancement**: `BagOfWordsEmbeddingBackend` was upgraded from "whole word + Chinese bigrams" to "whole word + English character 3/4-grams (subword) + Chinese trigrams", capturing word-form variants (running/run) and spelling variants (database/databases) with no external dependency.
 - **Multilingual semantic model**: the `sentence` / `auto` default model was upgraded from English `all-MiniLM-L6-v2` to multilingual `paraphrase-multilingual-MiniLM-L12-v2` (Chinese-friendly), overridable via `--embed-model`.

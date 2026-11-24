@@ -1,14 +1,26 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecrecall"
 version = "2.2.0"
-description = "认知记忆系统：检索与组织解耦，纯语义向量检索，四层记忆栈，LLM 认知层"
+description = "本地优先的 AI 记忆系统：纯向量检索与组织层解耦，四层上下文，可选多 Agent 隔离与哈希链审计"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "snowfoxHQ" }]
+keywords = ["memory", "rag", "agent", "mcp", "vector-search", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 dependencies = []
 
@@ -17,6 +29,11 @@ chroma = ["chromadb>=0.5"]
 sentence = ["sentence-transformers>=3.0"]
 crypto = ["cryptography>=42.0"]
 full = ["chromadb>=0.5", "sentence-transformers>=3.0", "cryptography>=42.0"]
+
+[project.urls]
+Homepage = "https://github.com/snowfoxHQ/vecRecall"
+Changelog = "https://github.com/snowfoxHQ/vecRecall/blob/main/CHANGELOG.md"
+Issues = "https://github.com/snowfoxHQ/vecRecall/issues"
 
 [project.scripts]
 vr = "vecrecall.cli.main:main"
