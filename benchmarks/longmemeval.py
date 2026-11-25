@@ -62,6 +62,40 @@ from vecrecall.core.extractor import HeuristicExtractor  # noqa: E402
 from _metrics import average, dedupe, percentile, score  # noqa: E402
 
 CONFIGS = ("vector", "hybrid", "dedup", "graph", "bm25", "rrf")
+
+
+class CachedEmbedder:
+    """评测专用：每道题先批量嵌入全部写入单元和问题，各配置共用同一份向量。
+
+    语义模型逐条编码很慢（逐轮存储时每题约 490 条），批量编码快得多；
+    多个配置共用缓存，嵌入只算一次。每道题结束后清空，内存只占一道题的量。
+    缓存未命中时退回逐条编码，结果与不缓存完全一致。
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self._cache: dict[str, list[float]] = {}
+        self.misses = 0
+
+    def warm(self, texts: list[str]) -> None:
+        todo = [t for t in dict.fromkeys(texts) if t not in self._cache]
+        if todo:
+            for t, v in zip(todo, self.inner.embed_batch(todo)):
+                self._cache[t] = list(v)
+
+    def embed(self, text: str) -> list[float]:
+        v = self._cache.get(text)
+        if v is None:
+            self.misses += 1
+            v = list(self.inner.embed(text))
+            self._cache[text] = v
+        return v
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
+
+    def clear(self) -> None:
+        self._cache.clear()
 KS = (1, 5, 10)
 
 
@@ -206,6 +240,7 @@ def summarize(rows: list[dict]) -> dict:
         "n": len(rows),
         "session": average([r["session"] for r in rows]),
         "turn": average([r["turn"] for r in rows if r.get("turn")]),
+        "embed_ms_per_unit": sum(r.get("embed_ms_per_unit", 0.0) for r in rows) / max(1, len(rows)),
         "write_ms_p50": percentile(write, 50),
         "write_ms_p95": percentile(write, 95),
         "query_ms_p50": percentile(query, 50),
@@ -266,6 +301,9 @@ def render(results: dict, meta: dict) -> str:
         L.append(f"| {c} | {s['write_ms_p50']:.1f} | {s['write_ms_p95']:.1f} | "
                  f"{s['query_ms_p50']:.1f} | {s['query_ms_p95']:.1f} | "
                  f"{s['ctx_tokens@5']:.0f} | {s['memories_per_q']:.1f} / {s['units_per_q']:.1f} |")
+    emb = next(iter(results.values()))["embed_ms_per_unit"]
+    L.append("")
+    L.append(f"嵌入按题批量预计算，各配置共用，平均 {emb:.2f} ms/条；上表写入延迟不含嵌入时间。")
     L.append("")
     L.append("## 按题型（会话级 R_any@5）")
     L.append("")
@@ -320,13 +358,27 @@ def main() -> int:
 
     results: dict[str, dict] = {}
     dump = open(args.dump, "w", encoding="utf-8") if args.dump else None
+    cache = CachedEmbedder(embedder)
+    rows_by: dict[str, list[dict]] = {c: [] for c in configs}
+    t0 = time.perf_counter()
+    every = 10 if args.embedder != "bow" else 25
+    for i, q in enumerate(qs, 1):
+        units, _gs, _gt = build_units(q, args.granularity, args.user_only)
+        te = time.perf_counter()
+        cache.warm([u[2] for u in units] + [q["question"]])
+        per_unit = (time.perf_counter() - te) * 1000 / max(1, len(units))
+        for c in configs:
+            r = eval_question(q, c, cache, args.granularity, args.user_only, k_max)
+            r["embed_ms_per_unit"] = per_unit
+            rows_by[c].append(r)
+        cache.clear()
+        if i % every == 0 or i == len(qs):
+            el = time.perf_counter() - t0
+            print(f"  {i}/{len(qs)}  用时 {el:.0f}s  预计剩余 {el / i * (len(qs) - i):.0f}s",
+                  flush=True)
+
     for c in configs:
-        rows = []
-        t0 = time.perf_counter()
-        for i, q in enumerate(qs, 1):
-            rows.append(eval_question(q, c, embedder, args.granularity, args.user_only, k_max))
-            if i % 25 == 0 or i == len(qs):
-                print(f"  [{c}] {i}/{len(qs)}  用时 {time.perf_counter() - t0:.0f}s", flush=True)
+        rows = rows_by[c]
         if dump:
             for r in rows:
                 rec = {k: v for k, v in r.items() if k != "write_ms"}
@@ -337,6 +389,8 @@ def main() -> int:
         m = s["session"]
         print(f"  {c:<7} R_any@5={pct(m['recall_any@5'])}  R_any@10={pct(m['recall_any@10'])}  "
               f"R_all@10={pct(m['recall_all@10'])}  nDCG@10={m['ndcg@10']:.3f}  MRR={m['mrr']:.3f}")
+    if cache.misses:
+        print(f"  （嵌入缓存未命中 {cache.misses} 次，已逐条补算）")
     if dump:
         dump.close()
 
