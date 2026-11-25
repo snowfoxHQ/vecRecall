@@ -142,6 +142,21 @@ def _print_results(results, verbose: bool = False):
             print(f"  摘要: {r.memory.ui_summary}")
         preview = r.memory.content[:200].replace("\n", " ")
         print(f"  内容: {preview}{'…' if len(r.memory.content) > 200 else ''}")
+        md = r.memory.metadata or {}
+        if md.get("superseded_by"):
+            print(f"  ⤷ 已被 {md['superseded_by'][:8]} 取代（信息可能过时，检索时降权）")
+        pv = md.get("provenance") or {}
+        if verbose and pv:
+            bits = [pv.get("via", "")]
+            if pv.get("agent"):
+                bits.append(f"agent={pv['agent']}")
+            if pv.get("session_id"):
+                bits.append(f"session={str(pv['session_id'])[:8]}")
+            if "turn_index" in pv:
+                bits.append(f"第 {pv['turn_index']} 轮")
+            if pv.get("source_ref"):
+                bits.append(f"ref={pv['source_ref']}")
+            print(f"  来源: {' · '.join(b for b in bits if b)}")
 
 
 def _print_memories(memories):

@@ -850,11 +850,11 @@ class MCPServer:
             if ctx.l1_key_moments:
                 lines.append("## 关键记忆")
                 for r in ctx.l1_key_moments:
-                    lines.append(f"- [{r.memory.topic}] {r.memory.content[:150]}")
+                    lines.append(f"- [{r.memory.topic}]{_stale(r.memory)} {r.memory.content[:150]}")
             if ctx.l2_topic_context:
                 lines.append("\n## 相关上下文")
                 for r in ctx.l2_topic_context:
-                    lines.append(f"- [相似度 {r.score:.2f}] {r.memory.content[:150]}")
+                    lines.append(f"- [相似度 {r.score:.2f}]{_stale(r.memory)} {r.memory.content[:150]}")
             lines.append(f"\n<!-- 估计 token 用量: {ctx.total_tokens_estimate} -->")
             return {"prompt": "\n".join(lines)}
 
@@ -881,6 +881,14 @@ class MCPServer:
 # 格式化辅助
 # ─────────────────────────────────────────────
 
+from vecrecall.core.models import status_fields  # noqa: E402
+
+
+def _stale(m) -> str:
+    """注入 prompt 时给已被取代的记忆加标记，让模型知道这条可能过时。"""
+    return "[已过时，被新记忆取代]" if (m.metadata or {}).get("superseded_by") else ""
+
+
 def _mem_dict(m, full: bool = False) -> dict:
     return memory_to_dict(m, full=full)
 
@@ -896,6 +904,7 @@ def _format_results(results) -> list[dict]:
             "ui_summary": r.memory.ui_summary,
             "content_preview": r.memory.content[:300],
             "acceptance": getattr(r, "acceptance", None),
+            **status_fields(r.memory),
         }
         for r in results
     ]

@@ -31,6 +31,27 @@ def estimate_tokens(text: str) -> int:
     return int(cjk * 0.7 + other / 4) + 1
 
 
+def status_fields(m) -> dict:
+    """检索结果里给 Agent 看的状态与来源摘要（v2.5）。
+
+    superseded_by：这条记忆已被另一条取代（信息可能过时），没有时不出现；
+    source：写入入口 / agent / 会话 / 轮次 / 调用方补充的 source_ref，旧记忆没有时不出现。
+    """
+    md = m.metadata or {}
+    out: dict = {}
+    if md.get("superseded_by"):
+        out["superseded_by"] = md["superseded_by"]
+    if md.get("supersedes"):
+        out["supersedes"] = list(md["supersedes"])
+    pv = md.get("provenance")
+    if isinstance(pv, dict):
+        src = {k: pv[k] for k in ("via", "agent", "session_id", "turn_index", "source_ref")
+               if k in pv}
+        if src:
+            out["source"] = src
+    return out
+
+
 def memory_to_dict(m, full: bool = False) -> dict:
     """将 Memory 序列化为 dict（MCP / REST / 导出统一使用）。"""
     d = {
@@ -46,6 +67,7 @@ def memory_to_dict(m, full: bool = False) -> dict:
         "retention_policy": m.retention_policy,
         "topic_key": m.topic_key,
     }
+    d.update(status_fields(m))
     if full:
         d["content"] = m.content
         d["session_id"] = m.session_id

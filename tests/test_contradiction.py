@@ -220,9 +220,37 @@ def test_engine():
         p.close()
 
 
+def test_result_fields():
+    print("\n[检索结果字段]")
+    from vecrecall.core.models import memory_to_dict
+    from vecrecall.mcp.server import MCPServer
+    with tempfile.TemporaryDirectory() as d:
+        s = MCPServer(base_dir=d, wing="c", embedding_backend=BagOfWordsEmbeddingBackend(),
+                      vector_backend=NumpyVectorBackend())
+        old = s._call("mp_add", {"content": "我们决定用 PostgreSQL 做主库", "importance": 0.9})["id"]
+        new = s._call("mp_add", {"content": "主库从 PostgreSQL 换成 MySQL", "importance": 0.9,
+                                 "provenance": {"source_ref": "ADR-7"}})["id"]
+        out = s._call("mp_search", {"query": "主库 PostgreSQL", "n": 5})
+        rows = out["results"] if isinstance(out, dict) else out   # mp_search 直接返回列表
+        res = {r["id"]: r for r in rows}
+        test("MCP 检索结果带 superseded_by", res[old].get("superseded_by") == new, str(res[old]))
+        test("未被取代的结果不带 superseded_by", "superseded_by" not in res[new])
+        test("MCP 检索结果带 supersedes", res[new].get("supersedes") == [old])
+        test("MCP 检索结果带来源", res[new].get("source", {}).get("via") == "mcp"
+             and res[new]["source"].get("source_ref") == "ADR-7", str(res[new].get("source")))
+        prompt = s._call("mp_format_prompt", {"current_query": "主库 PostgreSQL"})["prompt"]
+        line = [x for x in prompt.split("\n") if "PostgreSQL 做主库" in x]
+        test("prompt 里标记已过时", bool(line) and "已过时" in line[0], prompt)
+        test("prompt 里新记忆不标记", all("已过时" not in x for x in prompt.split("\n") if "MySQL" in x))
+        d2 = memory_to_dict(s._palace._kg.get(old))
+        test("memory_to_dict（REST 共用）带 superseded_by", d2.get("superseded_by") == new)
+        s._palace.close()
+
+
 if __name__ == "__main__":
     test_rule()
     test_detector()
     test_engine()
+    test_result_fields()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

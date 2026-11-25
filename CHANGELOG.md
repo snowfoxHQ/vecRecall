@@ -14,6 +14,7 @@
 
 ### 改动明细
 
+- **检索结果显示状态与来源**：MCP / REST 的检索结果与 `memory_to_dict()` 新增 `superseded_by`、`supersedes`、`source`（入口 / agent / 会话 / 轮次 / source_ref），没有时不出现；`mp_format_prompt` 给已被取代的记忆加「已过时」标记；`vr search` 显示「已被取代」，加 `--verbose` 显示来源。
 - **修复：private 记忆的默认 owner**：见升级须知第 3 条；`tests/test_provenance.py` 新增对应用例。
 - **来源追踪**：`add(provenance=...)` 记录写入来源，调用方可补充任意字段；`provenance(id)` 汇总写入来源、重复写入（`merged_from`）、取代、蒸馏关系。`archive_session()` 自动记录轮次与角色，`distill()`、推理链结论分别标记 `via=distill` / `reasoning`。MCP 新增 `mp_provenance`（共 37 个），`mp_add` 支持 `provenance`；REST 新增 `GET /memories/<id>/provenance`；`vr get` 显示来源。新增 `tests/test_provenance.py`。
 - **矛盾检测**：新增 `core/contradiction.py`（`RuleJudge`、`ContradictionDetector`、`Verdict`）。引擎新增 `contradictions()`、`supersede()`、`unsupersede()`，`search()` / `build_context()` 新增 `include_superseded`；可传 `contradiction_judge` 接 LLM。MCP 新增 `mp_contradictions`、`mp_supersede`（共 36 个），CLI 新增 `vr contradictions`、`vr supersede`（共 31 个）。规则在 27 对构造用例上无误判、正例全部识别；没有共同词的变更识别不了。评测见 `benchmarks/results/lme_s_bow_turn_rrf_contra.md`，`longmemeval.py` 新增 `--no-contradictions`。
