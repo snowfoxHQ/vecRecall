@@ -97,6 +97,8 @@ class CachedEmbedder:
     def clear(self) -> None:
         self._cache.clear()
 KS = (1, 5, 10)
+# 矛盾检测（v2.4 默认开启）；--no-contradictions 关闭，用于与 v2.3 基线对比
+DETECT_CONTRADICTIONS = True
 
 
 # ── 数据 ─────────────────────────────────────
@@ -179,6 +181,7 @@ def eval_question(q: dict, config: str, embedder, granularity: str,
             base_dir=d, wing="lme", embedding_backend=embedder,
             vector_backend=NumpyVectorBackend(),
             dedup=(config == "dedup"),
+            detect_contradictions=DETECT_CONTRADICTIONS,
             extractor=HeuristicExtractor() if config == "graph" else None,
         )
         mem_units: dict[str, list[tuple[str, str]]] = defaultdict(list)
@@ -336,7 +339,11 @@ def main() -> int:
     ap.add_argument("--k", type=int, default=10, help="检索条数上限（默认 10）")
     ap.add_argument("--out", default=None, help="Markdown 报告输出路径")
     ap.add_argument("--dump", default=None, help="逐题结果 JSONL 输出路径")
+    ap.add_argument("--no-contradictions", action="store_true",
+                    help="关闭矛盾检测（v2.4 默认开启），用于与 v2.3 基线对比")
     args = ap.parse_args()
+    global DETECT_CONTRADICTIONS
+    DETECT_CONTRADICTIONS = not args.no_contradictions
 
     configs = [c.strip() for c in args.configs.split(",") if c.strip()]
     bad = [c for c in configs if c not in CONFIGS]

@@ -172,6 +172,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 | 功能 | 说明 | 文档 |
 |---|---|---|
 | 认知层 | 写入时自动抽取话题、重要性、摘要、实体与关系；启发式零依赖，或接 Ollama / OpenAI 兼容 LLM | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#认知层llm-抽取--语义去重) |
+| 矛盾检测 | 新记忆推翻旧记忆时（「主库从 PostgreSQL 换成 MySQL」），旧记忆标记为被取代，检索时降权，不删除；可接 LLM 判断 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#矛盾检测) |
 | 语义去重 | 相似度 ≥ 0.92 时合并到已有记忆，计数加一 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#语义去重合并) |
 | 时序知识图谱 | 记录实体、关系和属性随时间的变化（「谁在什么时候是什么状态」） | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#时序知识图谱) |
 | 多跳检索 | 向量命中后沿实体关系扩展，返回带路径的证据 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#多跳向量图谱混合检索) |
@@ -193,9 +194,9 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 | 方式 | 入口 | 说明 |
 |---|---|---|
 | Python | `from vecrecall import VecRecall` | 全部功能 |
-| MCP | `vr-mcp` / `vr mcp` | 34 个工具，适用于 Claude Code、Gemini CLI 等 MCP 客户端 |
+| MCP | `vr-mcp` / `vr mcp` | 36 个工具，适用于 Claude Code、Gemini CLI 等 MCP 客户端 |
 | REST | `vr-api` / `vr api` | 零依赖 HTTP JSON 接口，默认 `127.0.0.1:8791` |
-| CLI | `vr` | 29 个子命令 |
+| CLI | `vr` | 31 个子命令 |
 
 完整的工具列表、端点和命令见 [docs/interfaces.md](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/interfaces.md)。
 

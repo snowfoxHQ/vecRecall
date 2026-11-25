@@ -82,6 +82,47 @@ vr add "..." --extractor ollama --llm-model llama3.2
 
 抽取结果自动填充记忆的 `topic`、`importance`、`ui_summary`，实体与关系存入 `metadata.entities` / `metadata.relations`（为后续时序知识图谱预留）。LLM 调用失败时自动降级启发式，写入永不阻塞。
 
+## 矛盾检测
+
+v2.4 起默认开启。新记忆推翻某条旧记忆时，旧记忆在 metadata 里记下 `superseded_by`（以及原因、置信度、时间），新记忆记下 `supersedes`，检索时旧记忆的分数乘以 `SUPERSEDED_WEIGHT`（默认 0.5）再重排。**不删除任何记忆。**
+
+```python
+old = palace.add("我们决定用 PostgreSQL 做主库")
+new = palace.add("主库从 PostgreSQL 换成 MySQL")
+palace.get(old.id).metadata["superseded_by"] == new.id   # True
+
+palace.search("主库用什么")                          # 新记忆排在前面
+palace.search("主库用什么", include_superseded=True)  # 不降权，原样排序
+palace.contradictions()                              # 全部取代记录
+palace.unsupersede(old.id)                           # 误判时撤销
+palace.supersede(old_id, new_id, reason="人工确认")   # 规则没识别时手动标记
+```
+
+**规则判断**（默认，零依赖）要同时满足三个条件，原则是宁可漏判、不误判：
+
+1. 新记忆带变更信号：「改用 / 换成 / 改到 / 不再 / switched / changed to / no longer」等；「现在 / now」这类弱信号要求更高的主题重合度。没有信号的写入直接跳过，不做额外检索。
+2. 两条记忆说的是同一件事：去掉变更词后的内容词重合度足够高。
+3. 旧值被换掉了：只是在旧记忆上补充信息（「PostgreSQL 主库的连接池设为 20」）不算。
+
+候选是向量相似度在 `CONTRADICTION_MIN_SIM`（0.2）到去重阈值（0.92）之间的前 5 条，限同 wing、对写入者可见、未被取代的记忆。immutable 记忆不参与（既不会被取代，也不会去取代别的记忆）；metadata 带 `_no_contradiction: True` 的单条写入跳过检测。
+
+**局限**：没有共同词的变更识别不了，例如「我住在西雅图」→「我上个月搬去了波士顿」。这类情况可以接 LLM：
+
+```python
+from vecrecall.core.contradiction import Verdict
+
+def judge(old_text: str, new_text: str):
+    # 调用 LLM 判断 new 是否推翻 old；是则返回 Verdict，否则返回 None
+    ...
+    return Verdict(confidence=0.9, reason="LLM：住址变更")
+
+palace = VecRecall(base_dir="~/.vr", contradiction_judge=judge)   # 规则或 LLM 任一判定即可
+```
+
+提供 judge 后每次写入都会找候选并调用它，写入成本相应增加。关闭检测：`VecRecall(..., detect_contradictions=False)`。
+
+MCP：`mp_contradictions`、`mp_supersede`；CLI：`vr contradictions`、`vr supersede`。
+
 ## 语义去重合并
 
 默认开启：写入前先做向量检索，若与既有记忆相似度 ≥ `dedup_threshold`（默认 0.92），则合并（`occurrences + 1`、重要性取较大值），而不是新增一条。

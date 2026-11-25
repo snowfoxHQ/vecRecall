@@ -32,6 +32,7 @@ from vecrecall.core.forgetting import ForgettingCurve
 from vecrecall.core.temporal_graph import TemporalGraph
 from vecrecall.core.hooks import HookRegistry, load_entry_point_plugins
 from vecrecall.core.lexical import BM25Index, LexicalCache, rrf_merge
+from vecrecall.core.contradiction import ContradictionDetector, Verdict
 # 向后兼容的再导出
 from vecrecall.core.models import (  # noqa: F401
     estimate_tokens, memory_to_dict, Memory, RetrievalResult, ContextBundle,
@@ -74,6 +75,10 @@ class VecRecall:
     # RRF 平滑常数与每路候选数倍率（每路取 n × 倍率 条再融合）
     RRF_K = 60
     RRF_CANDIDATES = 3
+    # 矛盾检测（v2.4）：候选相似度下限（上限即去重阈值）、候选数、被取代记忆的检索降权系数
+    CONTRADICTION_MIN_SIM = 0.2
+    CONTRADICTION_CANDIDATES = 5
+    SUPERSEDED_WEIGHT = 0.5
 
     def __init__(
         self,
@@ -91,6 +96,8 @@ class VecRecall:
         redact_payloads: bool = False,
         hooks: HookRegistry | None = None,
         load_plugins: bool = False,
+        detect_contradictions: bool = True,
+        contradiction_judge=None,
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -105,6 +112,9 @@ class VecRecall:
         # 语义去重：相似度 ≥ 阈值时合并到既有记忆（避免重复）
         self.dedup = dedup
         self.dedup_threshold = dedup_threshold
+        # 矛盾检测：新记忆推翻旧记忆时，旧记忆标记 superseded_by 并在检索时降权（不删除）
+        self.detect_contradictions = bool(detect_contradictions)
+        self._contradiction = ContradictionDetector(judge=contradiction_judge)
         # 写入前脱敏（不可逆，默认关闭；immutable 审计记忆永不脱敏）
         self.redact_payloads = bool(redact_payloads)
 
@@ -270,6 +280,14 @@ class VecRecall:
                 self.hooks.run_after_write(existing, True)
                 return existing
 
+        # 矛盾检测：在写入新记忆之前找候选，避免候选里出现自己
+        conflicts: list[tuple[Memory, Verdict]] = []
+        if (self.detect_contradictions and retention_policy != "immutable"
+                and not meta.pop("_no_contradiction", False)):
+            conflicts = self._find_contradictions(content, w, owner or self.owner)
+        else:
+            meta.pop("_no_contradiction", None)
+
         mem = Memory.create(
             wing=w, topic=topic, content=content,
             session_id=session_id, importance=importance,
@@ -289,6 +307,10 @@ class VecRecall:
 
         # 3. 时序知识图谱：实体/关系/状态演化
         self._ingest_graph(ext, mem.id, mem.timestamp)
+
+        # 3b. 矛盾：旧记忆标记被取代（不删除），新记忆记录它取代了谁
+        if conflicts:
+            self._apply_supersede(mem, conflicts)
 
         # 4. 可选：哈希链区块（防篡改审计；topic_key 非空时入独立子链）
         if self._chain is not None:
@@ -381,6 +403,7 @@ class VecRecall:
         viewer: str | None = None,
         as_of: float | None = None,
         mode: str | None = None,
+        include_superseded: bool = False,
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
@@ -424,6 +447,11 @@ class VecRecall:
             l3_results = self._deep_search(current_query, self.L3_TOP_K,
                                            hybrid=hybrid, as_of=as_of,
                                            mode=mode or self.DEFAULT_SEARCH_MODE)
+
+        # 被取代的旧记忆降权（L1 按重要性、L2/L3 按检索分数）
+        l1_results = self._apply_superseded_weight(l1_results, include_superseded)
+        l2_results = self._apply_superseded_weight(l2_results, include_superseded)
+        l3_results = self._apply_superseded_weight(l3_results, include_superseded)
 
         # 类型过滤：一处实现，L1/L2/L3 三层统一生效
         if memory_types is not None:
@@ -635,8 +663,12 @@ class VecRecall:
                hybrid: bool = False,
                acceptance_query: str | None = None,
                as_of: float | None = None,
-               mode: str | None = None) -> list[RetrievalResult]:
+               mode: str | None = None,
+               include_superseded: bool = False) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
+
+        被新记忆取代的旧记忆（metadata.superseded_by）分数乘以 SUPERSEDED_WEIGHT 后重排；
+        include_superseded=True 时不降权。
 
         min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
         as_of：hybrid 计算时间新鲜度的参考时刻（epoch 秒），默认当前时间。
@@ -650,6 +682,7 @@ class VecRecall:
         """
         results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid,
                                     as_of=as_of, mode=mode or self.DEFAULT_SEARCH_MODE)
+        results = self._apply_superseded_weight(results, include_superseded)
         results = self._filter_results(results)
         if acceptance_query is not None:
             from vecrecall.core.recall_policy import evaluate_memory
@@ -1058,6 +1091,120 @@ class VecRecall:
         return s
 
     # ── 辅助 ──────────────────────────────────
+
+    # ── 矛盾检测 ──────────────────────────────
+
+    def _find_contradictions(self, content: str, wing: str,
+                             viewer: str) -> list[tuple[Memory, Verdict]]:
+        """在已有记忆里找被 content 推翻的记忆。
+
+        候选：向量相似度在 [CONTRADICTION_MIN_SIM, dedup_threshold) 之间的前几条，
+        同 wing、对写入者可见、不是 immutable、尚未被取代。
+        规则模式下，新记忆没有变更信号时直接返回（不做检索）。
+        """
+        if not self._contradiction.needs_candidates(content):
+            return []
+        vec = self._emb.embed(content)
+        raw = self._vec.query(vec, n=self.CONTRADICTION_CANDIDATES * 2,
+                              min_score=self.CONTRADICTION_MIN_SIM)
+        raw = [r for r in raw if r[1] < self.dedup_threshold][: self.CONTRADICTION_CANDIDATES]
+        if not raw:
+            return []
+        mem_map = self._kg.get_many([r[0] for r in raw])
+        out: list[tuple[Memory, Verdict]] = []
+        for mid, sim, _p in raw:
+            m = mem_map.get(mid)
+            if m is None or m.wing != wing or m.retention_policy == "immutable":
+                continue
+            if m.metadata.get("superseded_by"):
+                continue
+            if viewer and not self._visible_to(m, viewer):
+                continue
+            v = self._contradiction.judge(m.content, content)
+            if v is not None:
+                v.detail = dict(v.detail, similarity=round(float(sim), 3))
+                out.append((m, v))
+        return out
+
+    def _apply_supersede(self, new: Memory, conflicts: list[tuple[Memory, Verdict]],
+                         manual: bool = False) -> None:
+        now = time.time()
+        for old, v in conflicts:
+            old.metadata["superseded_by"] = new.id
+            old.metadata["superseded_at"] = now
+            old.metadata["supersede_reason"] = v.reason
+            old.metadata["supersede_method"] = "manual" if manual else v.method
+            old.metadata["supersede_confidence"] = v.confidence
+            self._kg.save(old)
+            self._kg.add_link(new.id, old.id, link_type="supersedes", weight=v.confidence)
+        prev = list(new.metadata.get("supersedes") or [])
+        new.metadata["supersedes"] = prev + [o.id for o, _ in conflicts if o.id not in prev]
+        self._kg.save(new)
+
+    def _superseded_weight(self, m: Memory) -> float:
+        return self.SUPERSEDED_WEIGHT if m.metadata.get("superseded_by") else 1.0
+
+    def _apply_superseded_weight(self, results: list[RetrievalResult],
+                                 include_superseded: bool) -> list[RetrievalResult]:
+        """被取代的记忆分数乘以 SUPERSEDED_WEIGHT 后重新排序（稳定排序，其余顺序不变）。
+
+        rrf / bm25 下 score 是名次融合分数，乘以系数同样会让它排到后面。
+        include_superseded=True 时原样返回。
+        """
+        if include_superseded or not any(r.memory.metadata.get("superseded_by") for r in results):
+            return results
+        for r in results:
+            if r.memory.metadata.get("superseded_by"):
+                r.score *= self.SUPERSEDED_WEIGHT
+        return sorted(results, key=lambda r: r.score, reverse=True)
+
+    def contradictions(self, wing: str | None = None) -> list[dict]:
+        """列出全部「被取代」记录：[{old, new, reason, method, confidence, at}]，按时间倒序。"""
+        out = []
+        for m in self._kg.iter_all(wing=wing):
+            nid = m.metadata.get("superseded_by")
+            if not nid:
+                continue
+            if self.owner and not self._visible_to(m, self.owner):
+                continue
+            out.append({
+                "old_id": m.id, "old": m.content, "new_id": nid,
+                "new": (self._kg.get(nid).content if self._kg.get(nid) else None),
+                "reason": m.metadata.get("supersede_reason", ""),
+                "method": m.metadata.get("supersede_method", ""),
+                "confidence": m.metadata.get("supersede_confidence"),
+                "at": m.metadata.get("superseded_at"),
+            })
+        out.sort(key=lambda d: d["at"] or 0, reverse=True)
+        return out
+
+    def supersede(self, old_id: str, new_id: str, reason: str = "manual") -> None:
+        """手动标记 new 取代 old（规则没检测到时使用）。"""
+        old, new = self._kg.get(old_id), self._kg.get(new_id)
+        if not old or not new:
+            raise ValueError("记忆不存在")
+        if old.id == new.id:
+            raise ValueError("不能取代自己")
+        if old.retention_policy == "immutable":
+            raise ValueError("immutable 记忆不参与取代")
+        self._apply_supersede(new, [(old, Verdict(confidence=1.0, reason=reason, method="manual"))],
+                              manual=True)
+
+    def unsupersede(self, old_id: str) -> Memory:
+        """撤销取代标记（误判时使用）：恢复 old 的正常权重，并从新记忆的 supersedes 中移除。"""
+        old = self._kg.get(old_id)
+        if not old:
+            raise ValueError(f"记忆不存在: {old_id}")
+        nid = old.metadata.pop("superseded_by", None)
+        for k in ("superseded_at", "supersede_reason", "supersede_method", "supersede_confidence"):
+            old.metadata.pop(k, None)
+        old.metadata["supersede_dismissed"] = nid
+        self._kg.save(old)
+        new = self._kg.get(nid) if nid else None
+        if new is not None:
+            new.metadata["supersedes"] = [x for x in (new.metadata.get("supersedes") or []) if x != old_id]
+            self._kg.save(new)
+        return old
 
     def _heuristic_importance(self, content: str) -> float:
         """启发式重要性评分（委托给 extractor 模块，保持单处定义）"""

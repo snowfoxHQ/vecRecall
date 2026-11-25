@@ -15,6 +15,8 @@ VecRecall — CLI
   vr export WING [--out FILE]
   vr import FILE
   vr delete ID
+  vr contradictions [--wing W] [--limit N]
+  vr supersede OLD_ID NEW_ID | vr supersede OLD_ID --dismiss
   vr prune [--min-importance 0.3] [--older-than 90] [--wing W] [--yes]
   vr verify [--wing W]
   vr reindex
@@ -569,6 +571,53 @@ def cmd_delete(args, cfg):
     p.close()
 
 
+def _resolve_id(p, short_id: str) -> str | None:
+    if p._kg.get(short_id):
+        return short_id
+    rows = p._kg._conn.execute(
+        "SELECT id FROM memories WHERE id LIKE ?", (short_id + "%",)).fetchall()
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def cmd_contradictions(args, cfg):
+    """列出被取代的旧记忆"""
+    p = get_palace(cfg)
+    rows = p.contradictions(wing=args.wing)
+    if not rows:
+        print("没有检测到取代关系")
+        p.close()
+        return
+    print(f"共 {len(rows)} 条（被取代的记忆检索时降权，不删除；误判可用 vr supersede ID --dismiss 撤销）\n")
+    for r in rows[: args.limit]:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["at"] or 0))
+        print(f"[{ts}] {r['method']} {r['reason']}")
+        print(f"  旧 {r['old_id'][:8]}  {r['old'][:70]}")
+        print(f"  新 {r['new_id'][:8]}  {(r['new'] or '（已删除）')[:70]}\n")
+    p.close()
+
+
+def cmd_supersede(args, cfg):
+    """手动标记取代 / 撤销"""
+    p = get_palace(cfg)
+    old = _resolve_id(p, args.old_id)
+    if not old:
+        print(f"✗ 找不到或不唯一: {args.old_id}", file=sys.stderr)
+        p.close()
+        return
+    if args.dismiss:
+        p.unsupersede(old)
+        print(f"✓ 已撤销 {old[:8]} 的取代标记")
+    else:
+        new = _resolve_id(p, args.new_id or "")
+        if not new:
+            print("✗ 请提供新记忆 ID（或用 --dismiss 撤销）", file=sys.stderr)
+            p.close()
+            return
+        p.supersede(old, new, reason=args.reason)
+        print(f"✓ 已标记 {new[:8]} 取代 {old[:8]}")
+    p.close()
+
+
 def cmd_prune(args, cfg):
     """清理低价值记忆"""
     p = get_palace(cfg)
@@ -948,6 +997,16 @@ def main():
     p_del = sub.add_parser("delete", help="删除记忆（支持短 ID 前 8 位）")
     p_del.add_argument("id")
 
+    # contradictions / supersede
+    p_con = sub.add_parser("contradictions", help="列出被新记忆取代的旧记忆（检索时降权）")
+    p_con.add_argument("--wing", help="只看某个 wing")
+    p_con.add_argument("--limit", type=int, default=20)
+    p_sup = sub.add_parser("supersede", help="手动标记取代，或用 --dismiss 撤销误判")
+    p_sup.add_argument("old_id", help="旧记忆 ID（支持短 ID 前 8 位）")
+    p_sup.add_argument("new_id", nargs="?", help="新记忆 ID（标记取代时必填）")
+    p_sup.add_argument("--dismiss", action="store_true", help="撤销 old_id 的取代标记")
+    p_sup.add_argument("--reason", default="manual")
+
     # prune
     p_prune = sub.add_parser("prune", help="清理低价值记忆")
     p_prune.add_argument("--min-importance", type=float, help="重要性低于此值")
@@ -1061,6 +1120,7 @@ def main():
         "export": cmd_export, "import": cmd_import, "mcp": cmd_mcp,
         "browse": cmd_browse, "add-file": cmd_add_file,
         "get": cmd_get, "delete": cmd_delete, "prune": cmd_prune,
+        "contradictions": cmd_contradictions, "supersede": cmd_supersede,
         "verify": cmd_verify, "reindex": cmd_reindex,
         "api": cmd_api, "list": cmd_list,
         "graph": cmd_graph, "entity": cmd_entity,

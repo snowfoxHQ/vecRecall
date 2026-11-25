@@ -2,6 +2,16 @@
 
 最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
+## 未发布（v2.5）
+
+### 升级须知
+
+1. **矛盾检测默认开启**。新记忆带变更信号（「改用 / 换成 / 不再 / switched / no longer」等）且推翻了某条旧记忆时，旧记忆标记 `superseded_by`，检索时分数乘以 0.5 后重排（`search()` / `build_context()` 三层都生效），不删除。不想要时传 `detect_contradictions=False`；单次检索不降权传 `include_superseded=True`。LongMemEval-S（rrf，470 题）上会话级 R_any@5 94.7% → 94.9%，轮次级 R_any@5 84.3% → 83.2%；带变更信号的写入多一次候选检索，写入 p95 3.9 → 14.4 ms。
+
+### 改动明细
+
+- **矛盾检测**：新增 `core/contradiction.py`（`RuleJudge`、`ContradictionDetector`、`Verdict`）。引擎新增 `contradictions()`、`supersede()`、`unsupersede()`，`search()` / `build_context()` 新增 `include_superseded`；可传 `contradiction_judge` 接 LLM。MCP 新增 `mp_contradictions`、`mp_supersede`（共 36 个），CLI 新增 `vr contradictions`、`vr supersede`（共 31 个）。规则在 27 对构造用例上无误判、正例全部识别；没有共同词的变更识别不了。评测见 `benchmarks/results/lme_s_bow_turn_rrf_contra.md`，`longmemeval.py` 新增 `--no-contradictions`。
+
 ## v2.4.0（2026-11-25）检索性能
 
 10 万条记忆时，默认 `rrf` 检索 4,907 → 45 ms，开启去重的写入 4,324 → 16 ms，新进程首次检索 14 秒以上 → 5.6 秒。召回结果与 v2.3 一致。

@@ -28,7 +28,7 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 }
 ```
 
-## MCP 工具列表（共 34 个）
+## MCP 工具列表（共 36 个）
 
 **检索决策**
 - `mp_recall_policy` — 判断当前任务是否值得检索，并给出规范化查询意图
@@ -68,6 +68,10 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 
 **会话存档**
 - `mp_archive_session` — 存档对话：默认每轮一条记忆、共用 session_id；`granularity=session` 时整段一条
+
+**矛盾检测**
+- `mp_contradictions` — 列出被新记忆取代的旧记忆（检索时降权，不删除）
+- `mp_supersede` — `action=mark` 手动标记取代；`action=dismiss` 撤销误判
 
 **管理**
 - `mp_stats` — 系统统计
@@ -155,6 +159,8 @@ vr diary read reviewer "安全漏洞"
 
 # 记忆生命周期管理
 vr delete <记忆ID>                 # 删除（支持短 ID 前 8 位）
+vr contradictions                   # 列出被取代的旧记忆
+vr supersede <旧ID> <新ID>          # 手动标记取代；vr supersede <旧ID> --dismiss 撤销误判
 vr prune --min-importance 0.3 --older-than 90  # 清理低价值记忆（预览，加 --yes 确认）
 vr reindex                          # 从原文重建向量索引
 

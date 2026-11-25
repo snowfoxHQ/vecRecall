@@ -389,6 +389,34 @@ TOOLS = [
         },
     },
 
+    # ── 矛盾检测 ──
+    {
+        "name": "mp_contradictions",
+        "description": "列出「被新记忆取代」的旧记忆（检索时降权，不删除），按时间倒序",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "wing": {"type": "string", "description": "只看某个 wing，留空为全部"},
+                "limit": {"type": "integer", "default": 20},
+            },
+        },
+    },
+    {
+        "name": "mp_supersede",
+        "description": "手动处理取代关系：action=mark 标记 new_id 取代 old_id；"
+                       "action=dismiss 撤销 old_id 的取代标记（误判时用）",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["mark", "dismiss"]},
+                "old_id": {"type": "string"},
+                "new_id": {"type": "string", "description": "action=mark 时必填"},
+                "reason": {"type": "string", "default": "manual"},
+            },
+            "required": ["action", "old_id"],
+        },
+    },
+
     # ── 统计 & 管理类 ──
     {
         "name": "mp_stats",
@@ -733,6 +761,24 @@ class MCPServer:
                 "archived_id": mems[0].id if mems else None,
                 "chars": sum(len(m.content) for m in mems),
             }
+
+        elif name == "mp_contradictions":
+            rows = p.contradictions(wing=args.get("wing") or None)
+            limit = int(args.get("limit", 20))
+            return {"total": len(rows), "items": rows[:limit]}
+
+        elif name == "mp_supersede":
+            action = args["action"]
+            if action == "mark":
+                if not args.get("new_id"):
+                    raise ValueError("action=mark 需要 new_id")
+                p.supersede(args["old_id"], args["new_id"], reason=args.get("reason", "manual"))
+                return {"ok": True, "old_id": args["old_id"], "superseded_by": args["new_id"]}
+            if action == "dismiss":
+                m = p.unsupersede(args["old_id"])
+                return {"ok": True, "old_id": m.id,
+                        "dismissed": m.metadata.get("supersede_dismissed")}
+            raise ValueError(f"非法 action: {action}（mark / dismiss）")
 
         elif name == "mp_stats":
             return p.stats()
