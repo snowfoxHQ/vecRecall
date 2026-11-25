@@ -150,18 +150,18 @@ Data download, all options and per-category results: [benchmarks/README.md](http
 
 Latency of the default setup (SQLite vector backend + lexical embedding, numpy installed) at different sizes, in ms, p50:
 
-| Memories | `rrf` search (default) | `bm25` search | `vector` search | Write (no dedup) | Write (`add()` default dedup) | Disk |
-|---|---|---|---|---|---|---|
-| 1,000 | 1.1 | 0.3 | 0.5 | 4.2 | 4.2 | 6 MB |
-| 10,000 | 4.3 | 2.1 | 1.3 | 4.5 | 6.0 | 55 MB |
-| 50,000 | 22 | 12 | 5.4 | 4.6 | 10 | 276 MB |
-| 100,000 | 63 | 47 | 16 | 4.7 | 22 | 552 MB |
+| Memories | `rrf` search (default) | `bm25` search | `vector` search | Write (no dedup) | Write (`add()` default dedup) | First search in a new process | Disk |
+|---|---|---|---|---|---|---|---|
+| 1,000 | 0.9 | 0.3 | 0.5 | 4.2 | 4.3 | 38 | 6 MB |
+| 10,000 | 4.1 | 2.3 | 1.3 | 4.7 | 5.7 | 431 | 56 MB |
+| 50,000 | 21 | 14 | 5.6 | 4.7 | 9.7 | 2,557 | 286 MB |
+| 100,000 | 45 | 30 | 11 | 4.7 | 16 | 5,612 | 603 MB |
 
-Compared with v2.3 (100,000 memories): `rrf` search 4,907 → 63 ms (~78×), `vector` search 4,631 → 16 ms (~290×), writes with default dedup 4,324 → 22 ms (~200×).
+Compared with v2.3 (100,000 memories): `rrf` search 4,907 → 45 ms (~110×), `vector` search 4,631 → 11 ms (~420×), writes with default dedup 4,324 → 16 ms (~270×), first search in a new process 14+ s → 5.6 s.
 
 - Vectors are loaded into memory on the first search and kept in sync afterwards; with numpy installed, scoring is a single matrix product. `pip install "vecrecall[fast]"` installs numpy. Without it VecRecall falls back to pure Python, about 2–3× faster than v2.3 but still linear in the number of memories; install numpy above ~10,000 memories.
-- The first `rrf` / `bm25` search builds the BM25 index (about 0.9 s at 10,000 memories, 17 s at 100,000). Long-running MCP / REST servers pay this once; every `vr` CLI call is a new process and rebuilds it. Pass `mode="vector"` to skip it.
-- Process memory is about 780 MB at 1,000 memories (mostly Python and its libraries) and about 1.8 GB at 100,000.
+- "First search in a new process" is what every `vr` CLI call pays: loading vectors and building the BM25 index, mostly the latter (about 4.5 s at 100,000 memories). Tokenization results are cached in `lexical.db`, so only new or changed memories are re-tokenized. Long-running MCP / REST servers pay this once, on their first search. Pass `mode="vector"` to skip BM25.
+- Process memory is about 790 MB at 1,000 memories (mostly Python and its libraries) and about 1.9 GB at 100,000.
 
 Corpus: real conversation turns from LongMemEval-S; machine: an ordinary Windows desktop CPU, Python 3.14. Full reports: [v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md), [v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md). Reproduce: `python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`.
 

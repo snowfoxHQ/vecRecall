@@ -150,18 +150,18 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 
 默认配置（SQLite 向量后端 + 词法嵌入，已安装 numpy）在不同记忆数下的延迟，单位毫秒，p50：
 
-| 记忆数 | `rrf` 检索（默认） | `bm25` 检索 | `vector` 检索 | 写入（不去重） | 写入（`add()` 默认去重） | 磁盘 |
-|---|---|---|---|---|---|---|
-| 1,000 | 1.1 | 0.3 | 0.5 | 4.2 | 4.2 | 6 MB |
-| 10,000 | 4.3 | 2.1 | 1.3 | 4.5 | 6.0 | 55 MB |
-| 50,000 | 22 | 12 | 5.4 | 4.6 | 10 | 276 MB |
-| 100,000 | 63 | 47 | 16 | 4.7 | 22 | 552 MB |
+| 记忆数 | `rrf` 检索（默认） | `bm25` 检索 | `vector` 检索 | 写入（不去重） | 写入（`add()` 默认去重） | 新进程首次检索 | 磁盘 |
+|---|---|---|---|---|---|---|---|
+| 1,000 | 0.9 | 0.3 | 0.5 | 4.2 | 4.3 | 38 | 6 MB |
+| 10,000 | 4.1 | 2.3 | 1.3 | 4.7 | 5.7 | 431 | 56 MB |
+| 50,000 | 21 | 14 | 5.6 | 4.7 | 9.7 | 2,557 | 286 MB |
+| 100,000 | 45 | 30 | 11 | 4.7 | 16 | 5,612 | 603 MB |
 
-与 v2.3 相比（10 万条）：`rrf` 检索 4,907 → 63 ms（约 78 倍），`vector` 检索 4,631 → 16 ms（约 290 倍），默认去重写入 4,324 → 22 ms（约 200 倍）。
+与 v2.3 相比（10 万条）：`rrf` 检索 4,907 → 45 ms（约 110 倍），`vector` 检索 4,631 → 11 ms（约 420 倍），默认去重写入 4,324 → 16 ms（约 270 倍），新进程首次检索 14 秒以上 → 5.6 秒。
 
 - 向量在首次检索时载入内存，之后增量维护；装了 numpy 时用矩阵计算。`pip install "vecrecall[fast]"` 会装上 numpy；没装时自动退回纯 Python，比 v2.3 快约 2–3 倍，但仍随记忆数线性增长，1 万条以上建议安装。
-- 首次 `rrf` / `bm25` 检索要先建 BM25 索引（1 万条约 0.9 秒，10 万条约 17 秒）。MCP / REST 这类常驻服务只付一次；`vr` 命令行每次都是新进程，每次都要重建。只需要向量检索时可以传 `mode="vector"` 跳过。
-- 进程内存在 1 千条时约 780 MB，主要是 Python 与依赖库本身；10 万条时约 1.8 GB。
+- 「新进程首次检索」对应每次运行 `vr` 命令：要载入向量并构建 BM25 索引，其中大部分时间花在 BM25（10 万条约 4.5 秒）。分词结果缓存在 `lexical.db`，只有新增或修改过的记忆才重新分词。MCP / REST 这类常驻服务只在启动后第一次检索时付这个时间。只需要向量检索时可以传 `mode="vector"` 跳过 BM25。
+- 进程内存在 1 千条时约 790 MB，主要是 Python 与依赖库本身；10 万条时约 1.9 GB。
 
 数据来自 LongMemEval-S 的真实对话轮次，测试机为普通 Windows 桌面 CPU、Python 3.14。完整报告：[v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md)、[v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md)。复现：`python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`。
 

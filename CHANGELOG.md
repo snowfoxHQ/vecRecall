@@ -6,14 +6,17 @@
 
 ### 升级须知
 
-1. **默认向量后端改为内存索引 + 可选 numpy 矩阵计算**。`SqliteVectorBackend` 首次检索时把向量载入内存，之后随写入 / 删除增量维护；其他进程写同一个库时通过 `PRAGMA data_version` 发现并重新载入。10 万条时 `vector` 检索 4,631 → 16 ms，`rrf` 4,907 → 63 ms，默认去重写入 4,324 → 22 ms。新增安装选项 `vecrecall[fast]`（numpy），`[full]` 也包含；没装 numpy 时退回纯 Python。设置 `VECRECALL_NO_NUMPY=1` 可强制纯 Python。
+1. **默认向量后端改为内存索引 + 可选 numpy 矩阵计算**。`SqliteVectorBackend` 首次检索时把向量载入内存（装了 numpy 时整表一次载入），之后随写入 / 删除增量维护；其他进程写同一个库时通过 `PRAGMA data_version` 发现并重新载入。10 万条时 `vector` 检索 4,631 → 11 ms，`rrf` 4,907 → 45 ms，默认去重写入 4,324 → 16 ms。新增安装选项 `vecrecall[fast]`（numpy），`[full]` 也包含；没装 numpy 时退回纯 Python。设置 `VECRECALL_NO_NUMPY=1` 可强制纯 Python。
 2. **新写入的向量存为 float32**（原为 float64）。旧库无需迁移，两种格式可混存；但 v2.3 及更早版本读不了 v2.4 写入的向量，降级前请先 `reindex`。
-3. 装了 numpy 时分数按 float32 计算，与 v2.3 在小数点后第 6–7 位可能不同；分数恰好等于阈值的条目可能落到另一侧。
+3. **新增词频缓存文件 `<base_dir>/lexical.db`**（约 0.5 KB/条），新进程不必重新分词；内容等同于原文，开启静态加密的库不会生成它。可设 `palace.lexical_cache = False` 关闭，删除该文件也安全（下次检索时重建）。
+4. 装了 numpy 时分数按 float32 计算，与 v2.3 在小数点后第 6–7 位可能不同；分数恰好等于阈值的条目可能落到另一侧。
 
 ### 改动明细
 
 - **向量化检索**：新增 `core/dense.py`（`DenseIndex`），`NumpyVectorBackend` / `SqliteVectorBackend` 共用；结果顺序与 v2.3 一致（分数降序，同分按写入顺序）。新增 `tests/test_dense.py`，以 v2.3 逐条计算为对照；CI 分别在纯 Python 与 numpy 下运行。
-- **性能评估**：`benchmarks/results/scale_bow_v24.md`。
+- **整表载入向量**：装了 numpy 时整表一次解码、归一化，10 万条载入从约 1.5 秒降到约 0.2 秒。
+- **BM25 词频缓存**：新增 `LexicalCache`，按原文与分词版本的签名逐条校验，签名不符或缺失才重新分词，已删除的记忆自动清理；构建统计见 `palace.last_lexical_build`。构建只读 id 与原文两列。10 万条时新进程首次 rrf 检索 9.3 → 5.6 秒，同进程首次 14.2 → 8.6 秒。
+- **性能评估**：`bench_scale.py` 新增「新进程首次检索」测量；结果见 `benchmarks/results/scale_bow_v24.md`。
 
 ## v2.3.0（2026-11-25）召回质量与 HMR 模块移植
 
