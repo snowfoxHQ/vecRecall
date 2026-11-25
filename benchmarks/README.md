@@ -6,6 +6,7 @@
 |---|---|---|---|
 | `benchmark_recall.py` | 快速冒烟，确认没改坏 | 内置 21 组 query + 15 条干扰 | 秒级 |
 | `longmemeval.py` | 正式检索评测，作为版本对比基线 | LongMemEval（需下载） | 分钟到小时 |
+| `bench_scale.py` | 性能：1 千到 10 万条记忆时的检索 / 写入延迟、磁盘、内存 | LongMemEval 对话轮次或合成文本 | 约 20 分钟 |
 
 ## 内置评测
 

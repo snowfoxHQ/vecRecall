@@ -145,6 +145,31 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 
 ---
 
+## 规模与性能
+
+默认配置（SQLite 向量后端 + 词法嵌入）在不同记忆数下的延迟，单位毫秒，p50：
+
+| 记忆数 | `rrf` 检索（默认） | `bm25` 检索 | `vector` 检索 | 写入（不去重） | 写入（`add()` 默认去重） | 磁盘 |
+|---|---|---|---|---|---|---|
+| 1,000 | 44 | 0.3 | 45 | 4.3 | 47 | 6 MB |
+| 10,000 | 449 | 2.2 | 454 | 4.5 | 427 | 60 MB |
+| 50,000 | 2,303 | 12 | 2,267 | 4.4 | 2,152 | 300 MB |
+| 100,000 | 4,907 | 30 | 4,631 | 4.5 | 4,324 | 600 MB |
+
+- **几千条以内**（个人日常使用的常见规模）各项操作都在几百毫秒以内。
+- **瓶颈是默认的 SQLite 向量后端**：它用纯 Python 逐条计算相似度，`vector` / `rrf` 检索和开启去重的写入都随记忆数线性变慢，约 0.045 ms/条。BM25 本身很快，10 万条时 p50 仍只有 30 ms。
+- 首次 `rrf` / `bm25` 检索要先建 BM25 索引（1 万条约 1.3 秒，10 万条约 14 秒）。MCP / REST 这类常驻服务只付一次；`vr` 命令行每次都是新进程，每次都要重建。
+
+记忆较多时可以这样缓解：
+
+- 用 `archive_session()` 写入（逐轮模式默认不去重），或 `add(..., dedup=False)`，写入就不随库变大而变慢。
+- 换成 Chroma 后端（`pip install "vecrecall[chroma]"`，`vector_backend=ChromaVectorBackend(...)`），它用 ANN 索引，不做全量扫描。
+- 只需要词法检索时用 `mode="bm25"`。
+
+默认后端的 ANN / 向量化计算计划在 v2.4 实现。数据来自 LongMemEval-S 的真实对话轮次，测试机为普通 Windows 桌面 CPU、Python 3.14，完整报告见 [benchmarks/results/scale_bow.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md)，复现：`python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`。
+
+---
+
 ## 功能一览
 
 | 功能 | 说明 | 文档 |

@@ -1,16 +1,31 @@
 # 更新日志
 
-最新版本排在最前。详细设计说明见 [README.md](README.md) 的各版本升级说明章节。
+最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
-## 未发布（v2.3 开发中）
+## v2.3.0（2026-11-25）召回质量与 HMR 模块移植
+
+LongMemEval-S（470 题）会话级 R_any@5：零依赖默认配置 75.3% → **94.7%**；装语义模型后 **98.3%**。每次召回放进 prompt 的上下文（top-5）从约 13,900 token 降到约 1,100 token。
+
+### 升级须知（行为变化）
+
+1. **默认检索模式改为 `rrf`。**`search()` / `build_context()` / `mp_search` / REST `/search` / `vr search` 不传 `mode` 时走 rrf，返回的 `score` 是名次融合分数（约 0.01–0.04），**不再是余弦相似度**。按分数阈值过滤的调用方请显式传 `mode="vector"`，或设置 `palace.DEFAULT_SEARCH_MODE = "vector"`。L2 语义触发（0.55）与写入去重（0.92）仍按余弦相似度判断。
+2. **会话存档默认逐轮存储。**`mp_archive_session` / `vr archive` 每轮对话写一条记忆，共用 `session_id`，记忆条数约为原来的 10 倍。需要旧行为请传 `granularity="session"` 或 `--granularity session`。`mp_archive_session` 返回值新增字段，原有 `archived_id` 保留（逐轮模式下为第一条）。
+3. **检索会多走一路 BM25。**词法索引在首次 rrf / bm25 检索时从 SQLite 原文构建，之后增量维护；SQLite 后端在约 500 条记忆时检索 p50 约 56 ms（rrf）对 15 ms（vector）。
+4. v2.2 的数据库可以直接打开，不需要迁移；之前按整段会话存的记忆照常可以检索。
+5. **已知限制：默认 SQLite 向量后端是全量扫描。**`vector` / `rrf` 检索与开启去重的 `add()` 约 0.045 ms/条：1 万条约 0.45 秒，10 万条约 4.6–4.9 秒；BM25 在 10 万条时仍为 30 ms。记忆较多时请用 `archive_session()` / `dedup=False` 写入，或换 Chroma 后端。ANN 计划在 v2.4。
+
+### 改动明细
 
 - **会话存档默认改为逐轮存储**：新增 `VecRecall.archive_session(messages, granularity="turn")`，每轮对话一条记忆，共用同一个 `session_id`，metadata 记录 `turn_index` 与 `role`；新增 `session_memories(session_id)` 按顺序取回整段会话。MCP `mp_archive_session` 与 CLI `vr archive` 改为调用它。依据：LongMemEval-S（词法嵌入，470 题），相比整段存一条，会话级 R_any@5 75.3% → 92.1%、R_any@1 50.0% → 77.9%，top-5 上下文约 13,900 → 900 token；代价是记忆条数约增加 10 倍，SQLite 后端检索延迟 p50 从约 2 ms 升到约 18 ms。**行为变化**：需要旧行为请传 `granularity="session"` 或 `vr archive --granularity session`。逐轮模式默认关闭语义去重，避免不同会话里的相同语句被合并。`mp_archive_session` 返回值新增 `session_id` / `granularity` / `archived` / `ids`，保留 `archived_id`（逐轮模式下为第一条）。`vr archive` 读取文件改为显式 UTF-8，并新增 `--session-id`。
 - **记忆卡片门槛（移植自 HMR memory_card）**：新增插件 `vecrecall.plugins.memory_card`，`enable_memory_cards(palace)` 后，以 `CODE_AGENT_MEMORY` 开头的结构化经验卡片在写入前（`before_write`，覆盖 Python API / MCP / REST / CLI 所有入口）按门槛校验：`status=verified` 必须写 `validation` 且 `signal` 不能为空或 unknown，`failed_attempt` 必须写 `failed_shape`，`problem` 不能为空。默认严格模式直接拒绝；`strict=False` 时把不合格的 verified / failed_attempt 降级为 candidate。卡片字段写入 metadata，调用方无法通过 metadata 覆盖状态；卡片不参与语义去重；`list_cards()` 按状态、仓库列出。核心新增 metadata 标记 `_no_dedup`，钩子可借此让单条写入跳过去重（标记不落盘）。
 - **推理链与反思（移植自 HMR ThoughtChain）**：新增可选模块 `vecrecall.reasoning`。`ReasoningEngine(palace)` 记录一次推理任务的观察 / 假设 / 决策 / 行动，`reflect()` 用实际结果评分并标记每个节点对错；评分明确（> 0.85 或 < 0.25）时把结论作为 semantic 记忆写入主库（topic=`reasoning_insight`），写入失败时留在链上，可用 `retry_pending_insights()` 补写。`find_similar()` 用 rrf 检索取候选、再按词重叠过滤；`best_decision_for()` 返回相似历史链中准确率最高的正确决策。链保存在独立推理库 `<base_dir>/reasoning/`，推理过程不会出现在主库检索结果中；遵循 owner / visibility 隔离，主库加密时同样加密。不依赖 pydantic / numpy。
 - **Trace 插件（移植自 HMR）**：新增 `vecrecall.plugins.trace`，通过扩展钩子（`after_write` / `on_delete` / `recall_filter`）把写入、去重合并、删除、召回事件记成按天分文件的 JSONL（默认 `<base_dir>/traces/`）。`enable_trace(palace)` 一行开启，默认只记元数据，`capture_content=True` 时记录原文并先脱敏再截断；脱敏复用 `core/redaction.py`。event_id 进程内去重、保留期按文件名日期清理（默认 7 天）、单文件大小上限后分文件。Trace 写入失败只计数，不影响记忆写入与检索。已知限制：零结果的检索不会留下记录；召回事件不含查询原文。
 - **默认检索模式改为 rrf**：`search()` / `build_context()` 不传 `mode` 时使用 `VecRecall.DEFAULT_SEARCH_MODE`（默认 `"rrf"`），MCP `mp_search`、REST `/search`、CLI `vr search` 同步。依据：LongMemEval-S（逐轮存储、词法嵌入、470 题）会话级 R_any@5 vector 92.1% → rrf 94.7%、R_any@1 77.9% → 87.0%；内置评测 R@1 52.4% → 61.9%、近义改写组 R@5 16.7% → 50.0%。纯 bm25 在 LongMemEval 上略高（96.6%），但无法利用语义嵌入，因此默认选 rrf。**行为变化**：① rrf 下 `score` 是名次融合分数（约 0.01–0.04），不再是余弦相似度，依赖分数阈值的调用方请显式传 `mode="vector"`；② 检索要多走一路 BM25，词法索引首次检索时构建；③ 需要旧行为可传 `mode="vector"`，或设置 `palace.DEFAULT_SEARCH_MODE = "vector"`。L2 语义触发与去重仍按余弦相似度，不受影响。
-- **BM25 + RRF 混合检索**：新增 `core/lexical.py`（零依赖 BM25 倒排索引 + Reciprocal Rank Fusion）。`search()` / `build_context()` 新增 `mode` 参数：`vector`（默认，行为不变）/ `bm25`（纯词法）/ `rrf`（向量与 BM25 各取 n×3 条候选，按名次融合，k=60）。词法索引在首次 bm25 / rrf 检索时从 SQLite 原文构建，之后随 add / update / delete / distill 增量维护，`reindex()` 后重建；可见性过滤与 `recall_filter` 钩子同样生效。MCP `mp_search`、REST `/search`、CLI `vr search --mode` 同步支持。LongMemEval 评测新增 `bm25` / `rrf` 配置。已知限制：多进程同时写同一数据目录时，其他进程新写入的记忆要等本进程重建索引后才能被词法检索到。
+- **BM25 + RRF 混合检索**：新增 `core/lexical.py`（零依赖 BM25 倒排索引 + Reciprocal Rank Fusion）。`search()` / `build_context()` 新增 `mode` 参数：`vector`（纯向量）/ `bm25`（纯词法）/ `rrf`（向量与 BM25 各取 n×3 条候选，按名次融合，k=60）。词法索引在首次 bm25 / rrf 检索时从 SQLite 原文构建，之后随 add / update / delete / distill 增量维护，`reindex()` 后重建；可见性过滤与 `recall_filter` 钩子同样生效。MCP `mp_search`、REST `/search`、CLI `vr search --mode` 同步支持。LongMemEval 评测新增 `bm25` / `rrf` 配置。已知限制：多进程同时写同一数据目录时，其他进程新写入的记忆要等本进程重建索引后才能被词法检索到。
 - **hybrid 时间基准**：`search()` / `build_context()` 新增可选参数 `as_of`，按指定时刻计算时间新鲜度；不传时与之前一致。LongMemEval 中 hybrid 以提问时刻为基准后，knowledge-update +4.2、temporal-reasoning -3.1，整体 R_any@5 74.7%（vector 75.3%），hybrid 仍默认关闭。
+- **检索性能评估**：新增 `benchmarks/bench_scale.py`，用 LongMemEval 真实对话轮次从 1 千写到 10 万条，测三种检索模式、首次建索引、去重写入、磁盘与内存。结果见 `benchmarks/results/scale_bow.md`。
+- **语义嵌入基线**：LongMemEval-S（逐轮存储、默认多语言 MiniLM、470 题）rrf R_any@5 98.3%、R_any@1 91.3%、MRR 0.944，各项均高于纯 bm25（96.6% / 87.9% / 0.914）；偏好类 R_any@5 96.7%。评测脚本新增按题批量嵌入缓存，各配置共用同一份向量。
+- **README 重写**：按当前功能重新组织，详细用法移到 `docs/guide.md`，接口清单移到 `docs/interfaces.md`，早期升级说明移到 `docs/upgrade-notes.md`；删除无法复现的原版召回率对比数字。
 - **CI**：新增 GitHub Actions，测试矩阵 Linux Python 3.10–3.12 + Windows 3.12，含打包检查；新增基于 Trusted Publishing 的标签自动发布工作流与 `RELEASING.md`。
 - CLI 描述更新为新的定位。
 
