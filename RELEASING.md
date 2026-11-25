@@ -23,8 +23,8 @@
    git checkout main
    git pull
    git log --oneline -1          # 确认是要发布的提交
-   git tag -a v2.3.0 -m "v2.3.0"
-   git push origin v2.3.0
+   git tag -a v2.4.0 -m "v2.4.0"
+   git push origin v2.4.0
    ```
 
 5. 在 GitHub **Actions** 页面查看 *Publish to PyPI*；如果设置了 Required reviewers，点 **Review deployments → Approve**。

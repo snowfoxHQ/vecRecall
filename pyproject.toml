@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vecrecall"
-version = "2.3.0"
+version = "2.4.0"
 description = "本地优先的 AI 记忆系统：纯向量检索与组织层解耦，四层上下文，可选多 Agent 隔离与哈希链审计"
 readme = "README.md"
 requires-python = ">=3.10"
