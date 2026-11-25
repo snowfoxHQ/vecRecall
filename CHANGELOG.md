@@ -10,8 +10,11 @@
 
 2. **新记忆的 metadata 多了 `provenance` 字段**（写入入口、Agent、会话、轮次、时间）。直接比较整个 metadata 的代码需要注意；旧记忆不受影响，`provenance()` 对它们返回推断结果并标记 `legacy`。MCP / REST / CLI 写入的 `via` 分别是 `mcp` / `rest` / `cli`。
 
+3. **`add()` 没传 `owner` 时改用实例的 `owner`**。v2.4 及以前，`VecRecall(owner="alice")` 实例写入时如果不传 `owner`，记忆的 owner 是空的，按「老数据」处理，private 也对所有人可见。v2.5 起这类记忆归 alice 所有，其他 owner 看不到。实例没设 `owner`（单机模式）时行为不变。已经存进库里的记忆不会自动改；需要的话用 `update_visibility()` 或重新写入。
+
 ### 改动明细
 
+- **修复：private 记忆的默认 owner**：见升级须知第 3 条；`tests/test_provenance.py` 新增对应用例。
 - **来源追踪**：`add(provenance=...)` 记录写入来源，调用方可补充任意字段；`provenance(id)` 汇总写入来源、重复写入（`merged_from`）、取代、蒸馏关系。`archive_session()` 自动记录轮次与角色，`distill()`、推理链结论分别标记 `via=distill` / `reasoning`。MCP 新增 `mp_provenance`（共 37 个），`mp_add` 支持 `provenance`；REST 新增 `GET /memories/<id>/provenance`；`vr get` 显示来源。新增 `tests/test_provenance.py`。
 - **矛盾检测**：新增 `core/contradiction.py`（`RuleJudge`、`ContradictionDetector`、`Verdict`）。引擎新增 `contradictions()`、`supersede()`、`unsupersede()`，`search()` / `build_context()` 新增 `include_superseded`；可传 `contradiction_judge` 接 LLM。MCP 新增 `mp_contradictions`、`mp_supersede`（共 36 个），CLI 新增 `vr contradictions`、`vr supersede`（共 31 个）。规则在 27 对构造用例上无误判、正例全部识别；没有共同词的变更识别不了。评测见 `benchmarks/results/lme_s_bow_turn_rrf_contra.md`，`longmemeval.py` 新增 `--no-contradictions`。
 

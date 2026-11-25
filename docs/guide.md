@@ -249,7 +249,7 @@ vr graph-search "Alice" --hops 2
 ## 类型化记忆与多 Agent 隔离
 
 - **类型化记忆**：`memory_type` = episodic / semantic / procedural。semantic 必进时序图谱；procedural（规则、阈值、策略）用 `query_procedural(scenario_tags, version)` 按「场景标签 + 版本」精确匹配，不走向量模糊召回。`build_context(memory_types=[...])` 一处过滤 L1/L2/L3。
-- **隔离**：`wing` × `visibility`（private / shared）× `owner`。private 只有写入者能看到，shared 同 wing 可见，跨 wing 关联只对双方都是 shared 的记忆开放。owner 为空的老数据视为公开；实例没配 owner 时不过滤。
+- **隔离**：`wing` × `visibility`（private / shared）× `owner`。private 只有写入者能看到，shared 同 wing 可见，跨 wing 关联只对双方都是 shared 的记忆开放。`add()` 没传 `owner` 时用实例的 `owner`（v2.5 起；之前会留空）。owner 为空的记忆视为公开；实例没配 owner 时不过滤。
 - **不可变记忆与分链**：`retention_policy="immutable"` 的记忆不去重、不遗忘、不被 prune、不参与蒸馏，始终进入 L1；哈希链按 `(wing, topic_key)` 分链，单个主题的记录可以单独验证（`verify_integrity(topic_key=...)`、`query_by_topic_key(prefix)`）。
 
 ```python
@@ -274,7 +274,7 @@ with VecRecall(base_dir="~/.vr", wing="my-project") as palace:
 agent_a = VecRecall(base_dir="~/.vr", wing="team", owner="agent-a")
 agent_b = VecRecall(base_dir="~/.vr", wing="team", owner="agent-b")
 
-agent_a.add("A 的私有笔记", owner="agent-a")                # private：仅 A 可见
+agent_a.add("A 的私有笔记")                # private：仅 A 可见（v2.5 起默认 owner=agent-a）
 mem = agent_a.add("团队共识：代码评审需两人通过", visibility="shared",
                   memory_type="procedural")                 # shared：同 wing 可见
 

@@ -198,6 +198,9 @@ class VecRecall:
         - scenario_tags / policy_version: procedural 专用（写入 metadata）
         """
         w = wing or self.wing
+        # v2.5：没传 owner 时用实例的 owner。否则配置了 owner 的实例写入的 private 记忆
+        # owner 为空，按「老数据」处理变成所有人可见。
+        owner = owner or self.owner
 
         redaction_counts: dict[str, int] = {}
         if self.redact_payloads and retention_policy != "immutable":
@@ -291,7 +294,7 @@ class VecRecall:
         conflicts: list[tuple[Memory, Verdict]] = []
         if (self.detect_contradictions and retention_policy != "immutable"
                 and not meta.pop("_no_contradiction", False)):
-            conflicts = self._find_contradictions(content, w, owner or self.owner)
+            conflicts = self._find_contradictions(content, w, owner)
         else:
             meta.pop("_no_contradiction", None)
 

@@ -159,6 +159,32 @@ def test_legacy_and_visibility():
         bob.close()
 
 
+def test_default_owner():
+    """v2.5：add() 没传 owner 时用实例 owner，private 记忆真正私有。"""
+    print("\n[默认 owner]")
+    with tempfile.TemporaryDirectory() as d:
+        alice = make(d, owner="alice")
+        m = alice.add("alice 没显式传 owner 的记忆")
+        test("没传 owner 时用实例 owner", alice._kg.get(m.id).owner == "alice")
+        shared = alice.add("团队都能看的记忆", visibility="shared")
+        bob = make(d, owner="bob")
+        ids = {r.memory.id for r in bob.search("记忆", n=10, mode="bm25")}
+        test("bob 看不到 alice 的 private 记忆", m.id not in ids, str(ids))
+        test("bob 能看到 shared 记忆", shared.id in ids, str(ids))
+        try:
+            bob.provenance(m.id)
+            test("bob 查不到其来源", False)
+        except ValueError:
+            test("bob 查不到其来源", True)
+        alice.close()
+        bob.close()
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d)
+        m = p.add("单机模式的记忆")
+        test("实例没有 owner 时仍为空（单机模式不变）", p._kg.get(m.id).owner == "")
+        p.close()
+
+
 def test_entrypoints():
     print("\n[入口标识]")
     from vecrecall.mcp.server import MCPServer
@@ -182,6 +208,7 @@ if __name__ == "__main__":
     test_merge()
     test_relations()
     test_legacy_and_visibility()
+    test_default_owner()
     test_entrypoints()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)
