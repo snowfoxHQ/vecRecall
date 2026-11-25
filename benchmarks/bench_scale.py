@@ -160,6 +160,29 @@ def ms(t0: float) -> float:
     return (time.perf_counter() - t0) * 1000
 
 
+def measure_new_process(p, d, emb, query) -> dict:
+    """模拟 CLI：新开一个实例做第一次 rrf 检索（要载入向量、构建 BM25）。
+
+    cold：词频缓存需要补齐（本检查点新增的记忆要重新分词并写入缓存）；
+    warm：缓存已完整，再开一个新实例。
+    """
+    def once():
+        q = VecRecall(base_dir=d, wing="bench", embedding_backend=emb,
+                      vector_backend=SqliteVectorBackend(os.path.join(d, "vectors.db")),
+                      dedup=False)
+        t = time.perf_counter()
+        q.search(query, n=10, mode="rrf")
+        dt = ms(t)
+        st = dict(q.last_lexical_build)
+        q.close()
+        return dt, st
+    gc.collect()
+    cold, _ = once()
+    warm, st = once()
+    return {"np_cold_ms": cold, "np_warm_ms": warm, "np_warm_bm25_ms": st.get("ms", float("nan")),
+            "np_warm_hit": st.get("hit"), "np_warm_miss": st.get("miss")}
+
+
 # ── 主流程 ───────────────────────────────────
 
 def run(args) -> dict:
@@ -201,6 +224,7 @@ def run(args) -> dict:
                      "disk_mb": dir_mb(d)}
             qs = [queries[rng.randrange(len(queries))] for _ in range(args.queries)]
 
+            p.lexical_cache = False        # 「首次」列按无缓存计，与 v2.3 可比
             for mode in MODES:
                 p._bm25 = None             # 每个检查点重新计首次建索引的成本
                 gc.collect()
@@ -220,6 +244,13 @@ def run(args) -> dict:
                 print(f"          {mode:<6} p50={point[mode]['p50']:8.1f}ms  "
                       f"p95={point[mode]['p95']:8.1f}ms"
                       + (f"  首次(含建索引)={first:8.1f}ms" if first is not None else ""),
+                      flush=True)
+
+            p.lexical_cache = True
+            if args.backend == "sqlite":
+                point.update(measure_new_process(p, d, emb, qs[0]))
+                print(f"          新进程首次 rrf：建缓存时 {point['np_cold_ms']:.0f}ms，"
+                      f"有缓存 {point['np_warm_ms']:.0f}ms（其中 BM25 {point['np_warm_bm25_ms']:.0f}ms）",
                       flush=True)
 
             # 带去重的写入（默认 add() 的路径）
@@ -259,6 +290,15 @@ def render(res: dict) -> str:
           "| 记忆数 | bm25 首次 | rrf 首次 |", "|---|---|---|"]
     for pt in res["points"]:
         L.append(f"| {pt['size']:,} | {pt['bm25']['first']:.0f} | {pt['rrf']['first']:.0f} |")
+    if any("np_warm_ms" in pt for pt in res["points"]):
+        L += ["", "## 新进程首次 rrf 检索（模拟每次运行 vr 命令，ms）", "",
+              "| 记忆数 | 无缓存（v2.3 做法） | 建缓存那次 | 有缓存 | 其中 BM25 构建 |", "|---|---|---|---|---|"]
+        for pt in res["points"]:
+            if "np_warm_ms" in pt:
+                L.append(f"| {pt['size']:,} | {pt['rrf']['first']:.0f} | {pt['np_cold_ms']:.0f} | "
+                         f"{pt['np_warm_ms']:.0f} | {pt['np_warm_bm25_ms']:.0f} |")
+        L += ["", "「无缓存」取自上表的 rrf 首次（同进程，向量已在内存），新进程还要多载入一次向量，"
+              "所以实际 v2.3 的新进程耗时比这一列更长。"]
     L += ["", "## 写入与资源", "",
           "| 记忆数 | 写入 p50（无去重） | 写入 p50（默认去重） | 磁盘 MB | 进程内存 MB |",
           "|---|---|---|---|---|"]

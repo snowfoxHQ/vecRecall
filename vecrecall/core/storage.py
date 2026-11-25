@@ -226,6 +226,14 @@ class KnowledgeGraph:
         for r in rows:
             yield self._row_to_memory(r)
 
+    def iter_id_content(self) -> Iterator[tuple[str, str]]:
+        """只读 (id, 原文)，供构建词法索引（比 iter_all 少解析其他列）。"""
+        for mid, content in self._conn.execute(
+                "SELECT id, content FROM memories ORDER BY timestamp").fetchall():
+            if self._cipher is not None:
+                content = self._cipher.decrypt(content)
+            yield mid, content
+
     def count(self, wing: str | None = None) -> int:
         if wing:
             return self._conn.execute(

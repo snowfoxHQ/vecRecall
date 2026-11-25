@@ -31,7 +31,7 @@ from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
 from vecrecall.core.temporal_graph import TemporalGraph
 from vecrecall.core.hooks import HookRegistry, load_entry_point_plugins
-from vecrecall.core.lexical import BM25Index, rrf_merge
+from vecrecall.core.lexical import BM25Index, LexicalCache, rrf_merge
 # 向后兼容的再导出
 from vecrecall.core.models import (  # noqa: F401
     estimate_tokens, memory_to_dict, Memory, RetrievalResult, ContextBundle,
@@ -145,6 +145,10 @@ class VecRecall:
 
         # 词法索引：首次 bm25 / rrf 检索时从 SQLite 原文构建，之后增量维护
         self._bm25: BM25Index | None = None
+        # 词频磁盘缓存：新进程（如每次 vr 命令）不必重新分词；加密时不用，避免明文落盘
+        self.lexical_cache = encryption_key is None
+        self._lex_cache: LexicalCache | None = None
+        self.last_lexical_build: dict = {}
 
         # 可选哈希链：写入记忆时同步生成防篡改区块
         self._chain = None
@@ -527,9 +531,22 @@ class VecRecall:
     def _bm25_index(self) -> BM25Index:
         """取词法索引；首次使用时从 SQLite 原文构建。"""
         if self._bm25 is None:
-            idx = BM25Index()
-            for m in self._kg.iter_all():
-                idx.add(m.id, m.content)
+            import time as _t
+            t0 = _t.perf_counter()
+            docs = self._kg.iter_id_content()
+            if self.lexical_cache and self._cipher is None:
+                if self._lex_cache is None:
+                    self._lex_cache = LexicalCache(str(self.base_dir / "lexical.db"))
+                idx, stats = self._lex_cache.build(docs)
+            else:
+                idx = BM25Index()
+                n = 0
+                for mid, content in docs:
+                    idx.add(mid, content)
+                    n += 1
+                stats = {"hit": 0, "miss": n, "stale_removed": 0}
+            stats["ms"] = round((_t.perf_counter() - t0) * 1000, 1)
+            self.last_lexical_build = stats
             self._bm25 = idx
         return self._bm25
 
@@ -1071,6 +1088,9 @@ class VecRecall:
             self._chain.close()
         if hasattr(self._vec, "close"):
             self._vec.close()
+        if self._lex_cache is not None:
+            self._lex_cache.close()
+            self._lex_cache = None
 
     def __enter__(self):
         return self

@@ -181,6 +181,64 @@ def test_negative_score_case() -> None:
         p.close()
 
 
+def test_lexical_cache() -> None:
+    """v2.4：BM25 词频磁盘缓存。新进程复用缓存，结果与不用缓存完全一致。"""
+    print("\n[lexical cache]")
+    docs = ["user: 我们决定用 PostgreSQL 做主库", "user: I adopted a puppy named Max",
+            "assistant: The deploy rollback finished at 3pm", "user: 周末去爬山，天气不错"]
+    qs = ["PostgreSQL 主库", "puppy Max", "rollback deploy", "爬山"]
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d)
+        ids = [p.add(x).id for x in docs]
+        first = [[r.memory.id for r in p.search(q, n=4, mode="bm25")] for q in qs]
+        test("首次构建：全部重新分词", p.last_lexical_build.get("miss") == 4, str(p.last_lexical_build))
+        test("缓存文件已生成", os.path.exists(os.path.join(d, "lexical.db")))
+        p.close()
+
+        p = make(d)
+        again = [[r.memory.id for r in p.search(q, n=4, mode="bm25")] for q in qs]
+        test("新进程：全部命中缓存", p.last_lexical_build.get("hit") == 4
+             and p.last_lexical_build.get("miss") == 0, str(p.last_lexical_build))
+        test("命中缓存时结果不变", again == first, f"{again} vs {first}")
+
+        p.update(ids[0], content="user: 改用 MySQL 做主库")
+        p.delete(ids[1])
+        p.close()
+
+        p = make(d)
+        r = [x.memory.id for x in p.search("MySQL", n=4, mode="bm25")]
+        st = p.last_lexical_build
+        test("原文修改后重新分词", st.get("miss") == 1 and st.get("hit") == 2, str(st))
+        test("已删除的记忆从缓存清除", st.get("stale_removed") == 1, str(st))
+        test("修改后的内容可检索", r[:1] == [ids[0]], str(r))
+        test("已删除的记忆不再返回",
+             ids[1] not in [x.memory.id for x in p.search("puppy Max", n=4, mode="bm25")])
+
+        p.lexical_cache = False
+        p._bm25 = None
+        off = [[x.memory.id for x in p.search(q, n=4, mode="bm25")] for q in qs]
+        p.lexical_cache = True
+        p._bm25 = None
+        on = [[x.memory.id for x in p.search(q, n=4, mode="bm25")] for q in qs]
+        test("开关缓存结果一致", on == off, f"{on} vs {off}")
+        p.close()
+
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        print("  -    未安装 cryptography，跳过加密用例")
+        return
+    with tempfile.TemporaryDirectory() as d:
+        p = VecRecall(base_dir=d, wing="lex", embedding_backend=BagOfWordsEmbeddingBackend(),
+                      vector_backend=NumpyVectorBackend(), dedup=False,
+                      encryption_key="test-key-for-lexical-cache")
+        p.add("user: 机密项目代号 Phoenix")
+        res = p.search("Phoenix", n=1, mode="bm25")
+        test("加密库：检索正常", bool(res) and "Phoenix" in res[0].memory.content)
+        test("加密库：不写明文词频缓存", not os.path.exists(os.path.join(d, "lexical.db")))
+        p.close()
+
+
 def run_all() -> bool:
     test_tokenize()
     test_bm25()
@@ -188,6 +246,7 @@ def run_all() -> bool:
     test_engine_modes()
     test_engine_isolation_and_hooks()
     test_negative_score_case()
+    test_lexical_cache()
     print(f"\n{PASS}/{PASS + FAIL} passed")
     return FAIL == 0
 

@@ -113,9 +113,13 @@ class BM25Index:
 
     def add(self, doc_id: str, text: str) -> None:
         """加入或替换一篇文档。"""
+        self.add_tf(doc_id, Counter(tokenize(text)))
+
+    def add_tf(self, doc_id: str, tf: dict) -> None:
+        """用已分好词的词频加入或替换一篇文档（供磁盘缓存使用，跳过分词）。"""
         if doc_id in self._tf:
             self.remove(doc_id)
-        tf = Counter(tokenize(text))
+        tf = tf if isinstance(tf, Counter) else Counter(tf)
         self._tf[doc_id] = tf
         n = sum(tf.values())
         self._len[doc_id] = n
@@ -153,6 +157,71 @@ class BM25Index:
                 denom = f + self.k1 * (1.0 - self.b + self.b * self._len[d] / avgdl)
                 scores[d] = scores.get(d, 0.0) + idf * f * (self.k1 + 1.0) / denom
         return heapq.nlargest(n, scores.items(), key=lambda kv: kv[1])
+
+
+# 分词规则变化时递增，旧缓存自动失效
+TOKENIZER_VERSION = 1
+
+
+class LexicalCache:
+    """BM25 词频的磁盘缓存（<base_dir>/lexical.db），让新进程不必重新分词。
+
+    每条记忆存 (id, sig, tf_json)，sig = 原文与分词版本的哈希。
+    构建索引时把 SQLite 里的原文逐条与缓存比对：sig 一致直接用缓存的词频，
+    不一致或缺失才重新分词并写回；缓存里已不存在的记忆会被清掉。
+    所以缓存永远不会让检索结果出错，最坏情况只是退回重新分词。
+
+    缓存保存的是分词结果，等同于原文内容；开启静态加密时引擎不会使用它。
+    """
+
+    def __init__(self, db_path: str):
+        import sqlite3
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS lex_tf (id TEXT PRIMARY KEY, sig TEXT NOT NULL, tf TEXT NOT NULL)")
+        self._conn.commit()
+
+    @staticmethod
+    def signature(text: str) -> str:
+        import hashlib
+        h = hashlib.blake2b(digest_size=12)
+        h.update(str(TOKENIZER_VERSION).encode())
+        h.update((text or "").encode("utf-8", "surrogatepass"))
+        return h.hexdigest()
+
+    def build(self, docs: Iterable[tuple[str, str]], index: "BM25Index | None" = None) -> tuple["BM25Index", dict]:
+        """docs：(id, 原文)。返回 (索引, 统计 {hit, miss, stale_removed})。"""
+        import json
+        idx = index if index is not None else BM25Index()
+        cached = {mid: (sig, tf) for mid, sig, tf in
+                  self._conn.execute("SELECT id, sig, tf FROM lex_tf")}
+        seen: set[str] = set()
+        fresh: list[tuple[str, str, str]] = []
+        hit = 0
+        for mid, text in docs:
+            seen.add(mid)
+            sig = self.signature(text)
+            c = cached.get(mid)
+            if c is not None and c[0] == sig:
+                idx.add_tf(mid, json.loads(c[1]))
+                hit += 1
+            else:
+                tf = Counter(tokenize(text))
+                idx.add_tf(mid, tf)
+                fresh.append((mid, sig, json.dumps(tf, ensure_ascii=False)))
+        stale = [(mid,) for mid in cached if mid not in seen]
+        if fresh or stale:
+            self._conn.executemany("INSERT OR REPLACE INTO lex_tf (id, sig, tf) VALUES (?, ?, ?)", fresh)
+            self._conn.executemany("DELETE FROM lex_tf WHERE id=?", stale)
+            self._conn.commit()
+        return idx, {"hit": hit, "miss": len(fresh), "stale_removed": len(stale)}
+
+    def clear(self) -> None:
+        self._conn.execute("DELETE FROM lex_tf")
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
 
 
 def rrf_merge(rankings: Sequence[Iterable[str]], k: int = 60) -> list[tuple[str, float]]:
