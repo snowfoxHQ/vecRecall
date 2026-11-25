@@ -57,6 +57,8 @@ jobs:
         run: python tests/test_repo_map.py
       - name: test_lexical
         run: python tests/test_lexical.py
+      - name: test_trace
+        run: python tests/test_trace.py
 
       # 冒烟：评测脚本能跑通（不下载 LongMemEval，只用仓库内样例）
       - name: Benchmark smoke
