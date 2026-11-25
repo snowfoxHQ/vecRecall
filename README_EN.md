@@ -20,7 +20,7 @@ A cognitive memory system that also works as a memory runtime for multi-agent se
 | L2 trigger | Room name matching | **Semantic similarity threshold (default 0.55)** |
 | AAAK summary | Participates in retrieval index | **UI layer only, not indexed** |
 | Wing/Topic | Affects both retrieval and display | **UI organization only, no retrieval impact** |
-| Recall | ~84% R@5 (all features enabled, self-reported by the original) | **LongMemEval-S session-level R_any@5 75.3% (zero-dependency lexical embedding, 470 questions, reproducible)** |
+| Recall | ~84% R@5 (all features enabled, self-reported by the original) | **LongMemEval-S session-level R_any@5: 94.7% zero-dependency / 98.3% with the semantic model (470 questions, reproducible)** |
 
 The original's core problem: **the information organization layer and the retrieval path were tightly coupled**. Room filtering dropped recall from 96.6% to 89.4%, and AAAK participation in retrieval further dropped it to 84.2%. VecRecall separates the two completely: retrieval uses vectors, organization uses the SQLite UI layer.
 
@@ -268,12 +268,16 @@ vr graph-search "Alice" --hops 2
 
 v2.0's embedding has two tiers. Since v2.2 the public benchmark [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) is the official recall evaluation; the small built-in set is only a quick smoke test:
 
-| Embedding backend | LongMemEval-S R_any@5 | LongMemEval-S R_any@10 | Built-in R@5 | Dependency |
-|--|--|--|--|--|
-| Lexical (`bow`, default, zero-dependency) | 75.3% | 84.9% | 76.2% | None |
-| Semantic (`sentence`, multilingual MiniLM) | TBD | TBD | 100% | `pip install -e ".[sentence]"` |
+| Configuration (one memory per turn) | Embedding | R_any@1 | R_any@5 | R_any@10 | MRR | Preference R_any@5 | Dependency |
+|--|--|--|--|--|--|--|--|
+| `rrf` (default search mode) | semantic `sentence` | **91.3%** | **98.3%** | **98.9%** | **0.944** | **96.7%** | `pip install -e ".[sentence]"` |
+| `vector` | semantic `sentence` | 85.7% | 96.4% | 97.0% | 0.904 | 90.0% | same |
+| `bm25` | no embedding needed | 87.9% | 96.6% | 98.1% | 0.914 | 80.0% | none |
+| `rrf` (default search mode) | lexical `bow` (default, zero-dependency) | 87.0% | 94.7% | 98.3% | 0.907 | 66.7% | none |
+| `vector` | lexical `bow` | 77.9% | 92.1% | 94.3% | 0.835 | 46.7% | none |
+| `vector`, one memory per session (v2.2 default) | lexical `bow` | 50.0% | 75.3% | 84.9% | 0.611 | 26.7% | none |
 
-LongMemEval-S: 470 questions (the 30 abstention questions are skipped, as in the official setup), about 48 sessions per question, one memory per session, pure vector retrieval; retrieval only, no QA scoring. Per-type results and instructions are in [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md); raw results are in [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results).
+LongMemEval-S: 470 questions (the 30 abstention questions are skipped, as in the official setup), about 48 sessions and ~490 turns per question; session-level recall, retrieval only, no QA scoring. The two v2.3 default changes (archive one memory per turn, search with `rrf`) lift R_any@5 from 75.3% to 94.7% with zero dependencies and shrink recalled context from ~13,900 to ~1,100 tokens. With the semantic model, `rrf` reaches 98.3%, at the cost of one encoding per written memory (~14 ms per memory on an ordinary desktop CPU). Per-type results and instructions are in [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md); raw results are in [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results).
 
 - **Zero-dependency lexical enhancement**: `BagOfWordsEmbeddingBackend` was upgraded from "whole word + Chinese bigrams" to "whole word + English character 3/4-grams (subword) + Chinese trigrams", capturing word-form variants (running/run) and spelling variants (database/databases) with no external dependency.
 - **Multilingual semantic model**: the `sentence` / `auto` default model was upgraded from English `all-MiniLM-L6-v2` to multilingual `paraphrase-multilingual-MiniLM-L12-v2` (Chinese-friendly), overridable via `--embed-model`.

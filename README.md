@@ -22,7 +22,7 @@
 | L2 触发 | Room 名称匹配 | **语义相似度阈值（默认 0.55）** |
 | AAAK 摘要 | 参与检索索引 | **只写 UI 层，不进向量库** |
 | Wing/Topic | 同时影响检索和展示 | **只影响 UI 组织和浏览** |
-| 召回率 | ~84% R@5（启用全部特性时，原版自报） | **LongMemEval-S 会话级 R_any@5 75.3%（零依赖词法嵌入，470 题，可复现）** |
+| 召回率 | ~84% R@5（启用全部特性时，原版自报） | **LongMemEval-S 会话级 R_any@5：零依赖 94.7% / 装语义模型 98.3%（470 题，可复现）** |
 
 原版最大的问题：**信息组织层和检索路径耦合在一起**。Room 过滤让检索召回率从 96.6% 降到 89.4%，AAAK 参与检索后进一步降到 84.2%。VecRecall 把两件事彻底分开：检索走向量，组织走 SQLite UI 层。
 
@@ -270,12 +270,16 @@ vr graph-search "Alice" --hops 2
 
 v2.0 的嵌入分两层。v2.2 起以公开基准 [LongMemEval](https://github.com/xiaowu0162/LongMemEval)（ICLR 2025）作为正式召回评测，内置小评测集只用于快速冒烟：
 
-| 嵌入后端 | LongMemEval-S R_any@5 | LongMemEval-S R_any@10 | 内置评测 R@5 | 依赖 |
-|--|--|--|--|--|
-| 词法（`bow`，默认零依赖） | 75.3% | 84.9% | 76.2% | 无 |
-| 语义（`sentence`，多语言 MiniLM） | 待测 | 待测 | 100% | `pip install -e ".[sentence]"` |
+| 配置（每轮一条记忆） | 嵌入 | R_any@1 | R_any@5 | R_any@10 | MRR | 偏好类 R_any@5 | 依赖 |
+|--|--|--|--|--|--|--|--|
+| `rrf`（默认检索模式） | 语义 `sentence` | **91.3%** | **98.3%** | **98.9%** | **0.944** | **96.7%** | `pip install -e ".[sentence]"` |
+| `vector` | 语义 `sentence` | 85.7% | 96.4% | 97.0% | 0.904 | 90.0% | 同上 |
+| `bm25` | 不需要嵌入 | 87.9% | 96.6% | 98.1% | 0.914 | 80.0% | 无 |
+| `rrf`（默认检索模式） | 词法 `bow`（默认，零依赖） | 87.0% | 94.7% | 98.3% | 0.907 | 66.7% | 无 |
+| `vector` | 词法 `bow` | 77.9% | 92.1% | 94.3% | 0.835 | 46.7% | 无 |
+| `vector`，整段会话一条记忆（v2.2 默认） | 词法 `bow` | 50.0% | 75.3% | 84.9% | 0.611 | 26.7% | 无 |
 
-LongMemEval-S：470 道题（按官方做法跳过 30 道拒答题），每题约 48 个会话，每个会话一条记忆，纯向量检索，只评检索、不评问答。按题型的结果与运行方法见 [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md)，原始结果在 [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results)。
+LongMemEval-S：470 道题（按官方做法跳过 30 道拒答题），每题约 48 个会话、约 490 轮对话；会话级召回，只评检索、不评问答。v2.3 的两项默认改动（存档改为每轮一条、检索改为 `rrf`）在零依赖配置下把 R_any@5 从 75.3% 提到 94.7%，召回的上下文从约 13,900 token 降到约 1,100 token。装上语义模型后 `rrf` 进一步到 98.3%，代价是每条记忆写入时多一次编码（CPU 上约 14 ms/条，评测机器为普通桌面 CPU）。按题型的结果与运行方法见 [benchmarks/README.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/README.md)，原始结果在 [`benchmarks/results/`](https://github.com/snowfoxHQ/vecRecall/tree/main/benchmarks/results)。
 
 - **零依赖词法增强**：`BagOfWordsEmbeddingBackend` 从「整词 + 中文二元组」升级为「整词 + 英文字符 3/4-gram（subword）+ 中文三元组」，可捕获词形变化（running/run）与拼写变体（database/databases），无需任何外部依赖。
 - **语义模型多语言化**：`sentence` / `auto` 默认模型从英文 `all-MiniLM-L6-v2` 升级为多语言 `paraphrase-multilingual-MiniLM-L12-v2`（中文友好），可用 `--embed-model` 覆盖。
