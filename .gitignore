@@ -46,3 +46,6 @@ Thumbs.db
 
 # 评测数据（LongMemEval 等，需自行下载）
 benchmarks/data/
+
+# README 重写前的备份（本地留存，不提交）
+tmp_readme_backup/
