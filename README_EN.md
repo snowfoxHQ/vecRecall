@@ -24,6 +24,7 @@ The numbers are reproducible; see [Recall](#recall).
 ```bash
 pip install vecrecall                    # zero-dependency: lexical embedding + BM25 + SQLite
 pip install "vecrecall[sentence]"        # multilingual semantic model (higher recall, one encoding per write)
+pip install "vecrecall[fast]"            # numpy-accelerated vector search (recommended above ~10k memories)
 pip install "vecrecall[crypto]"          # at-rest encryption
 pip install "vecrecall[full]"            # all of the above + ChromaDB
 ```
@@ -147,26 +148,22 @@ Data download, all options and per-category results: [benchmarks/README.md](http
 
 ## Scale and performance
 
-Latency of the default setup (SQLite vector backend + lexical embedding) at different sizes, in ms, p50:
+Latency of the default setup (SQLite vector backend + lexical embedding, numpy installed) at different sizes, in ms, p50:
 
 | Memories | `rrf` search (default) | `bm25` search | `vector` search | Write (no dedup) | Write (`add()` default dedup) | Disk |
 |---|---|---|---|---|---|---|
-| 1,000 | 44 | 0.3 | 45 | 4.3 | 47 | 6 MB |
-| 10,000 | 449 | 2.2 | 454 | 4.5 | 427 | 60 MB |
-| 50,000 | 2,303 | 12 | 2,267 | 4.4 | 2,152 | 300 MB |
-| 100,000 | 4,907 | 30 | 4,631 | 4.5 | 4,324 | 600 MB |
+| 1,000 | 1.1 | 0.3 | 0.5 | 4.2 | 4.2 | 6 MB |
+| 10,000 | 4.3 | 2.1 | 1.3 | 4.5 | 6.0 | 55 MB |
+| 50,000 | 22 | 12 | 5.4 | 4.6 | 10 | 276 MB |
+| 100,000 | 63 | 47 | 16 | 4.7 | 22 | 552 MB |
 
-- **Up to a few thousand memories** (typical personal use), every operation stays within a few hundred milliseconds.
-- **The bottleneck is the default SQLite vector backend**: it computes similarity row by row in pure Python, so `vector` / `rrf` search and writes with dedup grow linearly with the number of memories, about 0.045 ms per memory. BM25 itself is fast: 30 ms p50 at 100,000 memories.
-- The first `rrf` / `bm25` search builds the BM25 index (about 1.3 s at 10,000 memories, 14 s at 100,000). Long-running MCP / REST servers pay this once; every `vr` CLI call is a new process and rebuilds it.
+Compared with v2.3 (100,000 memories): `rrf` search 4,907 → 63 ms (~78×), `vector` search 4,631 → 16 ms (~290×), writes with default dedup 4,324 → 22 ms (~200×).
 
-With large stores:
+- Vectors are loaded into memory on the first search and kept in sync afterwards; with numpy installed, scoring is a single matrix product. `pip install "vecrecall[fast]"` installs numpy. Without it VecRecall falls back to pure Python, about 2–3× faster than v2.3 but still linear in the number of memories; install numpy above ~10,000 memories.
+- The first `rrf` / `bm25` search builds the BM25 index (about 0.9 s at 10,000 memories, 17 s at 100,000). Long-running MCP / REST servers pay this once; every `vr` CLI call is a new process and rebuilds it. Pass `mode="vector"` to skip it.
+- Process memory is about 780 MB at 1,000 memories (mostly Python and its libraries) and about 1.8 GB at 100,000.
 
-- Write with `archive_session()` (per-turn mode skips dedup by default) or `add(..., dedup=False)`, so writes no longer slow down as the store grows.
-- Switch to the Chroma backend (`pip install "vecrecall[chroma]"`, `vector_backend=ChromaVectorBackend(...)`), which uses an ANN index instead of a full scan.
-- Use `mode="bm25"` when lexical search is enough.
-
-ANN / vectorized scoring for the default backend is planned for v2.4. Corpus: real conversation turns from LongMemEval-S; machine: an ordinary Windows desktop CPU, Python 3.14. Full report: [benchmarks/results/scale_bow.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md). Reproduce: `python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`.
+Corpus: real conversation turns from LongMemEval-S; machine: an ordinary Windows desktop CPU, Python 3.14. Full reports: [v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md), [v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md). Reproduce: `python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`.
 
 ---
 

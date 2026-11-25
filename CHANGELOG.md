@@ -2,17 +2,30 @@
 
 最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
+## 未发布（v2.4）
+
+### 升级须知
+
+1. **默认向量后端改为内存索引 + 可选 numpy 矩阵计算**。`SqliteVectorBackend` 首次检索时把向量载入内存，之后随写入 / 删除增量维护；其他进程写同一个库时通过 `PRAGMA data_version` 发现并重新载入。10 万条时 `vector` 检索 4,631 → 16 ms，`rrf` 4,907 → 63 ms，默认去重写入 4,324 → 22 ms。新增安装选项 `vecrecall[fast]`（numpy），`[full]` 也包含；没装 numpy 时退回纯 Python。设置 `VECRECALL_NO_NUMPY=1` 可强制纯 Python。
+2. **新写入的向量存为 float32**（原为 float64）。旧库无需迁移，两种格式可混存；但 v2.3 及更早版本读不了 v2.4 写入的向量，降级前请先 `reindex`。
+3. 装了 numpy 时分数按 float32 计算，与 v2.3 在小数点后第 6–7 位可能不同；分数恰好等于阈值的条目可能落到另一侧。
+
+### 改动明细
+
+- **向量化检索**：新增 `core/dense.py`（`DenseIndex`），`NumpyVectorBackend` / `SqliteVectorBackend` 共用；结果顺序与 v2.3 一致（分数降序，同分按写入顺序）。新增 `tests/test_dense.py`，以 v2.3 逐条计算为对照；CI 分别在纯 Python 与 numpy 下运行。
+- **性能评估**：`benchmarks/results/scale_bow_v24.md`。
+
 ## v2.3.0（2026-11-25）召回质量与 HMR 模块移植
 
 LongMemEval-S（470 题）会话级 R_any@5：零依赖默认配置 75.3% → **94.7%**；装语义模型后 **98.3%**。每次召回放进 prompt 的上下文（top-5）从约 13,900 token 降到约 1,100 token。
 
 ### 升级须知（行为变化）
 
-1. **默认检索模式改为 `rrf`。**`search()` / `build_context()` / `mp_search` / REST `/search` / `vr search` 不传 `mode` 时走 rrf，返回的 `score` 是名次融合分数（约 0.01–0.04），**不再是余弦相似度**。按分数阈值过滤的调用方请显式传 `mode="vector"`，或设置 `palace.DEFAULT_SEARCH_MODE = "vector"`。L2 语义触发（0.55）与写入去重（0.92）仍按余弦相似度判断。
-2. **会话存档默认逐轮存储。**`mp_archive_session` / `vr archive` 每轮对话写一条记忆，共用 `session_id`，记忆条数约为原来的 10 倍。需要旧行为请传 `granularity="session"` 或 `--granularity session`。`mp_archive_session` 返回值新增字段，原有 `archived_id` 保留（逐轮模式下为第一条）。
-3. **检索会多走一路 BM25。**词法索引在首次 rrf / bm25 检索时从 SQLite 原文构建，之后增量维护；SQLite 后端在约 500 条记忆时检索 p50 约 56 ms（rrf）对 15 ms（vector）。
+1. **默认检索模式改为 `rrf`**。`search()` / `build_context()` / `mp_search` / REST `/search` / `vr search` 不传 `mode` 时走 rrf，返回的 `score` 是名次融合分数（约 0.01–0.04），**不再是余弦相似度**。按分数阈值过滤的调用方请显式传 `mode="vector"`，或设置 `palace.DEFAULT_SEARCH_MODE = "vector"`。L2 语义触发（0.55）与写入去重（0.92）仍按余弦相似度判断。
+2. **会话存档默认逐轮存储**。`mp_archive_session` / `vr archive` 每轮对话写一条记忆，共用 `session_id`，记忆条数约为原来的 10 倍。需要旧行为请传 `granularity="session"` 或 `--granularity session`。`mp_archive_session` 返回值新增字段，原有 `archived_id` 保留（逐轮模式下为第一条）。
+3. **检索会多走一路 BM25**。词法索引在首次 rrf / bm25 检索时从 SQLite 原文构建，之后增量维护；SQLite 后端在约 500 条记忆时检索 p50 约 56 ms（rrf）对 15 ms（vector）。
 4. v2.2 的数据库可以直接打开，不需要迁移；之前按整段会话存的记忆照常可以检索。
-5. **已知限制：默认 SQLite 向量后端是全量扫描。**`vector` / `rrf` 检索与开启去重的 `add()` 约 0.045 ms/条：1 万条约 0.45 秒，10 万条约 4.6–4.9 秒；BM25 在 10 万条时仍为 30 ms。记忆较多时请用 `archive_session()` / `dedup=False` 写入，或换 Chroma 后端。ANN 计划在 v2.4。
+5. **已知限制：默认 SQLite 向量后端是全量扫描**。`vector` / `rrf` 检索与开启去重的 `add()` 约 0.045 ms/条：1 万条约 0.45 秒，10 万条约 4.6–4.9 秒；BM25 在 10 万条时仍为 30 ms。记忆较多时请用 `archive_session()` / `dedup=False` 写入，或换 Chroma 后端。ANN 计划在 v2.4。
 
 ### 改动明细
 

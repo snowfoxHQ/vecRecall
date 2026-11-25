@@ -63,6 +63,16 @@ jobs:
         run: python tests/test_reasoning.py
       - name: test_memory_card
         run: python tests/test_memory_card.py
+      - name: test_dense (pure Python)
+        run: python tests/test_dense.py
+
+      # 再装 numpy，把向量化路径也跑一遍（上面的测试都是纯 Python 路径）
+      - name: Install numpy
+        run: python -m pip install numpy
+      - name: test_dense (numpy)
+        run: python tests/test_dense.py
+      - name: test_core (numpy)
+        run: python tests/test_core.py
 
       # 冒烟：评测脚本能跑通（不下载 LongMemEval，只用仓库内样例）
       - name: Benchmark smoke

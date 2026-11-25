@@ -36,38 +36,36 @@ class VectorBackend:
 
 
 class NumpyVectorBackend(VectorBackend):
-    """纯 numpy 实现，零依赖，适合开发和测试"""
+    """内存向量后端（不持久化），适合开发和测试。
 
-    def __init__(self):
-        self._store: dict[str, tuple[list[float], dict]] = {}
+    装了 numpy 时用矩阵计算，否则纯 Python；见 core/dense.py。
+    """
+
+    def __init__(self, use_numpy: bool | None = None):
+        from vecrecall.core.dense import DenseIndex
+        self._index = DenseIndex(use_numpy)
 
     def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-        self._store[memory_id] = (vector, payload)
+        self._index.upsert(memory_id, vector, payload, keep_position=True)
 
     def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-        import math
-        results = []
-        qv = vector
-        qnorm = math.sqrt(sum(x * x for x in qv)) or 1e-9
-
-        for mid, (v, payload) in self._store.items():
-            vnorm = math.sqrt(sum(x * x for x in v)) or 1e-9
-            dot = sum(a * b for a, b in zip(qv, v))
-            score = dot / (qnorm * vnorm)
-            if score >= min_score:
-                results.append((mid, score, payload))
-
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:n]
+        return self._index.query(vector, n, min_score)
 
     def delete(self, memory_id: str) -> None:
-        self._store.pop(memory_id, None)
+        self._index.delete(memory_id)
 
     def count(self) -> int:
-        return len(self._store)
+        return len(self._index)
 
     def clear(self) -> None:
-        self._store.clear()
+        self._index.clear()
+
+
+def _decode_vec(dim: int, blob: bytes) -> tuple[float, ...]:
+    """v2.4 起新写入为 float32（每维 4 字节），旧库为 float64（8 字节），按长度识别。"""
+    if len(blob) == dim * 4:
+        return struct.unpack(f"<{dim}f", blob)
+    return struct.unpack(f"<{dim}d", blob)
 
 
 class SqliteVectorBackend(VectorBackend):
@@ -77,9 +75,14 @@ class SqliteVectorBackend(VectorBackend):
     与 NumpyVectorBackend 的区别：
       - NumpyVectorBackend 纯内存，进程退出即丢失全部向量索引
       - 本后端把向量以二进制 BLOB 存入 SQLite，默认安装下记忆可跨会话检索
+
+    v2.4：首次查询时把全部向量载入内存索引（core/dense.py），之后增量维护，
+    查询不再每次读库、逐条解码。装了 numpy 时用矩阵计算。
+    其他连接（另一个进程）写入同一个库时，通过 PRAGMA data_version 发现并重新载入。
+    新写入的向量存为 float32，旧库的 float64 向量照常读取。
     """
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, use_numpy: bool | None = None):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("""
         CREATE TABLE IF NOT EXISTS vectors (
@@ -89,33 +92,57 @@ class SqliteVectorBackend(VectorBackend):
             payload TEXT DEFAULT '{}'
         )""")
         self._conn.commit()
+        self._use_numpy = use_numpy
+        self._index = None
+        self._data_version = None
+
+    def _version(self) -> int:
+        return self._conn.execute("PRAGMA data_version").fetchone()[0]
+
+    def _ensure_index(self):
+        ver = self._version()
+        if self._index is not None and ver == self._data_version:
+            return self._index
+        from vecrecall.core.dense import DenseIndex
+        idx = DenseIndex(self._use_numpy)
+        for seq, (mid, dim, blob, payload) in enumerate(self._conn.execute(
+                "SELECT id, dim, vec, payload FROM vectors ORDER BY rowid")):
+            idx.upsert(mid, _decode_vec(dim, blob), json.loads(payload), seq=seq)
+        self._index = idx
+        self._data_version = ver
+        return idx
+
+    def _sync_version(self) -> None:
+        if self._index is not None:
+            self._data_version = self._version()
 
     def upsert(self, memory_id: str, vector: list[float], payload: dict) -> None:
-        blob = struct.pack(f"<{len(vector)}d", *vector)
+        blob = struct.pack(f"<{len(vector)}f", *vector)
         self._conn.execute(
             "INSERT OR REPLACE INTO vectors (id, dim, vec, payload) VALUES (?, ?, ?, ?)",
             (memory_id, len(vector), blob,
              json.dumps(payload, ensure_ascii=False)),
         )
         self._conn.commit()
+        if self._index is not None:
+            stale = self._version() != self._data_version
+            if stale:
+                self._index = None              # 别的进程也写过，下次查询整体重载
+            else:
+                # INSERT OR REPLACE 会把已有行移到末尾，排序上与重新读库一致
+                self._index.upsert(memory_id, vector, payload, keep_position=False)
 
     def query(self, vector: list[float], n: int, min_score: float = 0.0) -> list[tuple[str, float, dict]]:
-        qnorm = math.sqrt(sum(x * x for x in vector)) or 1e-9
-        results = []
-        for mid, dim, blob, payload in self._conn.execute(
-            "SELECT id, dim, vec, payload FROM vectors"
-        ):
-            v = struct.unpack(f"<{dim}d", blob)
-            vnorm = math.sqrt(sum(x * x for x in v)) or 1e-9
-            score = sum(a * b for a, b in zip(vector, v)) / (qnorm * vnorm)
-            if score >= min_score:
-                results.append((mid, score, json.loads(payload)))
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:n]
+        return self._ensure_index().query(vector, n, min_score)
 
     def delete(self, memory_id: str) -> None:
         self._conn.execute("DELETE FROM vectors WHERE id=?", (memory_id,))
         self._conn.commit()
+        if self._index is not None:
+            if self._version() != self._data_version:
+                self._index = None
+            else:
+                self._index.delete(memory_id)
 
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM vectors").fetchone()[0]
@@ -123,8 +150,10 @@ class SqliteVectorBackend(VectorBackend):
     def clear(self) -> None:
         self._conn.execute("DELETE FROM vectors")
         self._conn.commit()
+        self._index = None
 
     def close(self) -> None:
+        self._index = None
         self._conn.close()
 
 

@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-brightgreen)](https://python.org)
 [![许可证](https://img.shields.io/badge/license-MIT-green)](https://github.com/snowfoxHQ/vecRecall/blob/main/LICENSE)
 
-**本地优先的 AI 记忆库。**给 Agent 和 AI 应用存长期记忆：存原文、按需召回、只把相关的几百 token 放进 prompt。默认零依赖，数据全部在本机 SQLite 里；需要多 Agent 隔离、不可变审计记录时也能直接用。
+**本地优先的 AI 记忆库**。给 Agent 和 AI 应用存长期记忆：存原文、按需召回、只把相关的几百 token 放进 prompt。默认零依赖，数据全部在本机 SQLite 里；需要多 Agent 隔离、不可变审计记录时也能直接用。
 
 English: [README_EN.md](https://github.com/snowfoxHQ/vecRecall/blob/main/README_EN.md) · 版本记录：[CHANGELOG.md](https://github.com/snowfoxHQ/vecRecall/blob/main/CHANGELOG.md)
 
@@ -24,6 +24,7 @@ English: [README_EN.md](https://github.com/snowfoxHQ/vecRecall/blob/main/README_
 ```bash
 pip install vecrecall                    # 零依赖：词法嵌入 + BM25 + SQLite
 pip install "vecrecall[sentence]"        # 加多语言语义模型（召回更高，写入时每条多一次编码）
+pip install "vecrecall[fast]"            # numpy 加速向量检索（1 万条以上建议）
 pip install "vecrecall[crypto]"          # 加静态加密
 pip install "vecrecall[full]"            # 以上全部 + ChromaDB
 ```
@@ -98,13 +99,13 @@ vr context "JWT 有效期多长，要不要改" --l3
 
 ## 核心设计
 
-**检索和组织分开。**`wing`（项目）、`topic`（话题）只用来浏览和整理，不参与检索过滤；检索永远在全部记忆上做。按目录过滤检索的做法，会把放错目录的相关记忆直接漏掉。
+**检索和组织分开**。`wing`（项目）、`topic`（话题）只用来浏览和整理，不参与检索过滤；检索永远在全部记忆上做。按目录过滤检索的做法，会把放错目录的相关记忆直接漏掉。
 
-**存原文，摘要只给人看。**写入的内容逐字保存；`ui_summary` 等摘要只在列表里展示，不参与检索。
+**存原文，摘要只给人看**。写入的内容逐字保存；`ui_summary` 等摘要只在列表里展示，不参与检索。
 
-**按轮存储，按需召回。**会话默认每轮对话存一条记忆。和整段会话存一条相比，命中的那一轮不会被长会话里的其他内容稀释，召回的上下文也只有原来的约十二分之一。
+**按轮存储，按需召回**。会话默认每轮对话存一条记忆。和整段会话存一条相比，命中的那一轮不会被长会话里的其他内容稀释，召回的上下文也只有原来的约十二分之一。
 
-**四层上下文。**一次唤醒只加载需要的部分：
+**四层上下文**。一次唤醒只加载需要的部分：
 
 ```
 L0  身份      ~50 token    每次都加载
@@ -113,7 +114,7 @@ L2  语义触发  按需          与当前话题相似度 ≥ 0.55 才加载
 L3  深度检索  显式请求      默认 rrf 检索
 ```
 
-**默认用 rrf 检索。**同时跑向量检索和 BM25 词法检索，只按名次合并（Reciprocal Rank Fusion），不直接比较两边的分数。语义模型擅长同义改写，BM25 擅长精确词匹配，两路结果互补。零依赖时比纯向量高 2.6 个百分点；装上语义模型后在各项指标上都超过单独的 BM25。`mode="vector"` 或 `mode="bm25"` 可以切换。
+**默认用 rrf 检索**。同时跑向量检索和 BM25 词法检索，只按名次合并（Reciprocal Rank Fusion），不直接比较两边的分数。语义模型擅长同义改写，BM25 擅长精确词匹配，两路结果互补。零依赖时比纯向量高 2.6 个百分点；装上语义模型后在各项指标上都超过单独的 BM25。`mode="vector"` 或 `mode="bm25"` 可以切换。
 
 ---
 
@@ -147,26 +148,22 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 
 ## 规模与性能
 
-默认配置（SQLite 向量后端 + 词法嵌入）在不同记忆数下的延迟，单位毫秒，p50：
+默认配置（SQLite 向量后端 + 词法嵌入，已安装 numpy）在不同记忆数下的延迟，单位毫秒，p50：
 
 | 记忆数 | `rrf` 检索（默认） | `bm25` 检索 | `vector` 检索 | 写入（不去重） | 写入（`add()` 默认去重） | 磁盘 |
 |---|---|---|---|---|---|---|
-| 1,000 | 44 | 0.3 | 45 | 4.3 | 47 | 6 MB |
-| 10,000 | 449 | 2.2 | 454 | 4.5 | 427 | 60 MB |
-| 50,000 | 2,303 | 12 | 2,267 | 4.4 | 2,152 | 300 MB |
-| 100,000 | 4,907 | 30 | 4,631 | 4.5 | 4,324 | 600 MB |
+| 1,000 | 1.1 | 0.3 | 0.5 | 4.2 | 4.2 | 6 MB |
+| 10,000 | 4.3 | 2.1 | 1.3 | 4.5 | 6.0 | 55 MB |
+| 50,000 | 22 | 12 | 5.4 | 4.6 | 10 | 276 MB |
+| 100,000 | 63 | 47 | 16 | 4.7 | 22 | 552 MB |
 
-- **几千条以内**（个人日常使用的常见规模）各项操作都在几百毫秒以内。
-- **瓶颈是默认的 SQLite 向量后端**：它用纯 Python 逐条计算相似度，`vector` / `rrf` 检索和开启去重的写入都随记忆数线性变慢，约 0.045 ms/条。BM25 本身很快，10 万条时 p50 仍只有 30 ms。
-- 首次 `rrf` / `bm25` 检索要先建 BM25 索引（1 万条约 1.3 秒，10 万条约 14 秒）。MCP / REST 这类常驻服务只付一次；`vr` 命令行每次都是新进程，每次都要重建。
+与 v2.3 相比（10 万条）：`rrf` 检索 4,907 → 63 ms（约 78 倍），`vector` 检索 4,631 → 16 ms（约 290 倍），默认去重写入 4,324 → 22 ms（约 200 倍）。
 
-记忆较多时可以这样缓解：
+- 向量在首次检索时载入内存，之后增量维护；装了 numpy 时用矩阵计算。`pip install "vecrecall[fast]"` 会装上 numpy；没装时自动退回纯 Python，比 v2.3 快约 2–3 倍，但仍随记忆数线性增长，1 万条以上建议安装。
+- 首次 `rrf` / `bm25` 检索要先建 BM25 索引（1 万条约 0.9 秒，10 万条约 17 秒）。MCP / REST 这类常驻服务只付一次；`vr` 命令行每次都是新进程，每次都要重建。只需要向量检索时可以传 `mode="vector"` 跳过。
+- 进程内存在 1 千条时约 780 MB，主要是 Python 与依赖库本身；10 万条时约 1.8 GB。
 
-- 用 `archive_session()` 写入（逐轮模式默认不去重），或 `add(..., dedup=False)`，写入就不随库变大而变慢。
-- 换成 Chroma 后端（`pip install "vecrecall[chroma]"`，`vector_backend=ChromaVectorBackend(...)`），它用 ANN 索引，不做全量扫描。
-- 只需要词法检索时用 `mode="bm25"`。
-
-默认后端的 ANN / 向量化计算计划在 v2.4 实现。数据来自 LongMemEval-S 的真实对话轮次，测试机为普通 Windows 桌面 CPU、Python 3.14，完整报告见 [benchmarks/results/scale_bow.md](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md)，复现：`python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`。
+数据来自 LongMemEval-S 的真实对话轮次，测试机为普通 Windows 桌面 CPU、Python 3.14。完整报告：[v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md)、[v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md)。复现：`python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`。
 
 ---
 

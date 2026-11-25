@@ -28,7 +28,8 @@ dependencies = []
 chroma = ["chromadb>=0.5"]
 sentence = ["sentence-transformers>=3.0"]
 crypto = ["cryptography>=42.0"]
-full = ["chromadb>=0.5", "sentence-transformers>=3.0", "cryptography>=42.0"]
+fast = ["numpy>=1.24"]
+full = ["chromadb>=0.5", "sentence-transformers>=3.0", "cryptography>=42.0", "numpy>=1.24"]
 
 [project.urls]
 Homepage = "https://github.com/snowfoxHQ/vecRecall"
