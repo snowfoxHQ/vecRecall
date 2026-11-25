@@ -22,11 +22,20 @@ from typing import Iterator, Optional  # noqa: F401
 # ─────────────────────────────────────────────
 
 class EmbeddingBackend:
+    """embed() 用于写入的文档；embed_query() 用于检索查询。
+
+    对称模型（MiniLM、词法嵌入）两者相同。检索专用的非对称模型（e5 / bge）
+    要求查询和文档加不同前缀，子类覆盖 embed_query() 即可。
+    """
+
     def embed(self, text: str) -> list[float]:
         raise NotImplementedError
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         return [self.embed(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed(text)
 
 
 class HashEmbeddingBackend(EmbeddingBackend):
@@ -113,18 +122,58 @@ class BagOfWordsEmbeddingBackend(EmbeddingBackend):
 # 默认本地语义模型：多语言 MiniLM（384 维，中英等 50+ 语言友好）
 DEFAULT_SENTENCE_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
 
+# 检索专用模型的前缀约定（模型卡要求）：(查询前缀, 文档前缀)。按模型名子串匹配。
+MODEL_PREFIXES = {
+    "multilingual-e5": ("query: ", "passage: "),
+    "e5-": ("query: ", "passage: "),
+    "bge-small-zh": ("为这个句子生成表示以用于检索相关文章：", ""),
+    "bge-base-zh": ("为这个句子生成表示以用于检索相关文章：", ""),
+    "bge-large-zh": ("为这个句子生成表示以用于检索相关文章：", ""),
+    "bge-small-en": ("Represent this sentence for searching relevant passages: ", ""),
+    "bge-base-en": ("Represent this sentence for searching relevant passages: ", ""),
+    "bge-large-en": ("Represent this sentence for searching relevant passages: ", ""),
+}
+
+
+def prefixes_for(model: str) -> tuple[str, str]:
+    """返回模型的 (查询前缀, 文档前缀)；未知模型（含 bge-m3、MiniLM）不加前缀。"""
+    name = (model or "").lower()
+    for key, pre in MODEL_PREFIXES.items():
+        if key in name:
+            return pre
+    return ("", "")
+
 try:
     from sentence_transformers import SentenceTransformer
 
     class SentenceTransformerBackend(EmbeddingBackend):
-        def __init__(self, model: str = DEFAULT_SENTENCE_MODEL):
+        """本地 sentence-transformers 模型。
+
+        e5 / bge 等检索专用模型按 MODEL_PREFIXES 自动加查询 / 文档前缀；
+        也可以用 query_prefix / doc_prefix 显式指定（传 "" 表示不加）。
+        """
+
+        def __init__(self, model: str = DEFAULT_SENTENCE_MODEL,
+                     query_prefix: str | None = None, doc_prefix: str | None = None):
+            self.model_name = model
             self._model = SentenceTransformer(model)
+            qp, dp = prefixes_for(model)
+            self.query_prefix = qp if query_prefix is None else query_prefix
+            self.doc_prefix = dp if doc_prefix is None else doc_prefix
 
         def embed(self, text: str) -> list[float]:
-            return self._model.encode(text, normalize_embeddings=True).tolist()
+            return self._model.encode(self.doc_prefix + text, normalize_embeddings=True).tolist()
 
         def embed_batch(self, texts: list[str]) -> list[list[float]]:
-            return self._model.encode(texts, normalize_embeddings=True).tolist()
+            return self._model.encode([self.doc_prefix + t for t in texts],
+                                      normalize_embeddings=True).tolist()
+
+        def embed_query(self, text: str) -> list[float]:
+            return self._model.encode(self.query_prefix + text, normalize_embeddings=True).tolist()
+
+        def embed_query_batch(self, texts: list[str]) -> list[list[float]]:
+            return self._model.encode([self.query_prefix + t for t in texts],
+                                      normalize_embeddings=True).tolist()
 
 except ImportError:
     SentenceTransformerBackend = None  # type: ignore
@@ -238,7 +287,9 @@ def build_embedding_backend(kind: str = "auto", **kwargs) -> EmbeddingBackend:
         if SentenceTransformerBackend is None:
             raise RuntimeError(
                 "sentence-transformers 未安装，请 `pip install sentence-transformers`")
-        return SentenceTransformerBackend(kwargs.get("model") or DEFAULT_SENTENCE_MODEL)
+        return SentenceTransformerBackend(kwargs.get("model") or DEFAULT_SENTENCE_MODEL,
+                                          query_prefix=kwargs.get("query_prefix"),
+                                          doc_prefix=kwargs.get("doc_prefix"))
     if kind == "ollama":
         return OllamaEmbeddingBackend(
             model=kwargs.get("model") or "nomic-embed-text",

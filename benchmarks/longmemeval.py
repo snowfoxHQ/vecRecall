@@ -75,13 +75,32 @@ class CachedEmbedder:
     def __init__(self, inner):
         self.inner = inner
         self._cache: dict[str, list[float]] = {}
+        self._qcache: dict[str, list[float]] = {}   # 查询向量单独缓存（e5 / bge 前缀不同）
         self.misses = 0
 
-    def warm(self, texts: list[str]) -> None:
+    def warm(self, texts: list[str], queries: list[str] | None = None) -> None:
         todo = [t for t in dict.fromkeys(texts) if t not in self._cache]
         if todo:
             for t, v in zip(todo, self.inner.embed_batch(todo)):
                 self._cache[t] = list(v)
+        qs = [q for q in dict.fromkeys(queries or []) if q not in self._qcache]
+        if qs:
+            fn = getattr(self.inner, "embed_query_batch", None)
+            vs = fn(qs) if fn else [self._inner_query(q) for q in qs]
+            for q, v in zip(qs, vs):
+                self._qcache[q] = list(v)
+
+    def _inner_query(self, text: str) -> list[float]:
+        fn = getattr(self.inner, "embed_query", None)
+        return list(fn(text) if fn else self.inner.embed(text))
+
+    def embed_query(self, text: str) -> list[float]:
+        v = self._qcache.get(text)
+        if v is None:
+            self.misses += 1
+            v = self._inner_query(text)
+            self._qcache[text] = v
+        return v
 
     def embed(self, text: str) -> list[float]:
         v = self._cache.get(text)
@@ -96,6 +115,7 @@ class CachedEmbedder:
 
     def clear(self) -> None:
         self._cache.clear()
+        self._qcache.clear()
 KS = (1, 5, 10)
 # 矛盾检测（v2.4 默认开启）；--no-contradictions 关闭，用于与 v2.3 基线对比
 DETECT_CONTRADICTIONS = True
@@ -372,7 +392,7 @@ def main() -> int:
     for i, q in enumerate(qs, 1):
         units, _gs, _gt = build_units(q, args.granularity, args.user_only)
         te = time.perf_counter()
-        cache.warm([u[2] for u in units] + [q["question"]])
+        cache.warm([u[2] for u in units], queries=[q["question"]])
         per_unit = (time.perf_counter() - te) * 1000 / max(1, len(units))
         for c in configs:
             r = eval_question(q, c, cache, args.granularity, args.user_only, k_max)

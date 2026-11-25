@@ -507,7 +507,7 @@ class VecRecall:
         L2 语义触发：查询向量与历史记忆的余弦相似度 ≥ 阈值才返回。
         关键：不使用任何结构过滤条件（不按 wing/topic/room 限制）。
         """
-        vec = self._emb.embed(query)
+        vec = self._embed_query(query)
         raw = self._vec.query(vec, n=self.L2_TOP_K * 2, min_score=self.L2_TRIGGER_THRESHOLD)
 
         ids = [r[0] for r in raw]
@@ -543,7 +543,7 @@ class VecRecall:
         if mode != "vector":
             return self._lexical_search(query, n, mode=mode, min_score=min_score,
                                         hybrid=hybrid, as_of=as_of)
-        vec = self._emb.embed(query)
+        vec = self._embed_query(query)
         threshold = float("-inf") if min_score is None else min_score
         raw = self._vec.query(vec, n=n, min_score=threshold)
 
@@ -1302,6 +1302,11 @@ class VecRecall:
             new.metadata["supersedes"] = [x for x in (new.metadata.get("supersedes") or []) if x != old_id]
             self._kg.save(new)
         return old
+
+    def _embed_query(self, query: str) -> list[float]:
+        """检索查询的向量：非对称模型（e5 / bge）的查询前缀与文档不同。"""
+        fn = getattr(self._emb, "embed_query", None)
+        return fn(query) if fn is not None else self._emb.embed(query)
 
     def _heuristic_importance(self, content: str) -> float:
         """启发式重要性评分（委托给 extractor 模块，保持单处定义）"""
