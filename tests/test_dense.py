@@ -181,6 +181,8 @@ with tempfile.TemporaryDirectory() as d:
     store.pop("m201")
     test("SqliteVectorBackend 增量维护一致", close(sb.query(q, 15, None), reference(store, q, 15, None)))
     fresh = SqliteVectorBackend(path)
+    test("整表载入与增量维护分数一致",
+         close(sb.query(q, 15, None), fresh.query(q, 15, None)))
     test("SqliteVectorBackend 增量与重新读库名次一致",
          [x[0] for x in sb.query(q, 15, None)] == [x[0] for x in fresh.query(q, 15, None)])
     fresh.close()          # Windows 下未关闭的连接会锁住文件，临时目录删不掉
@@ -210,6 +212,9 @@ with tempfile.TemporaryDirectory() as d:
     test("旧库 float64 向量照常读取", r[0][0] == "a" and abs(r[0][1] - 1.0) < 1e-6 and abs(r[1][1]) < 1e-6)
     ob.upsert("c", [1, 1, 0], {"id": "c"})
     test("新旧格式混存可查询", [x[0] for x in ob.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
+    ob2 = SqliteVectorBackend(old)          # 重新打开：混存格式走整表载入
+    test("混存格式重新载入后一致", [x[0] for x in ob2.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
+    ob2.close()
     ob.clear()
     test("SqliteVectorBackend.clear", ob.count() == 0 and ob.query([1, 0, 0], 3) == [])
     ob.close()

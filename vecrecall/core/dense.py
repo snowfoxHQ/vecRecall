@@ -113,6 +113,26 @@ class DenseIndex:
         elif self._ragged is not None:
             self._ragged.pop(last, None)
 
+    def bulk_load(self, ids: list[str], mat, payloads: list[dict]) -> None:
+        """一次性载入（仅 numpy、空索引、所有向量同维度）：整体归一化，不逐行处理。
+
+        mat：(n, dim) 的 numpy 数组（未归一化），行顺序即写入顺序。
+        """
+        if not self.use_numpy or self._ids:
+            raise RuntimeError("bulk_load 只能用于空的 numpy 索引")
+        m = _np.asarray(mat, dtype=_np.float64)
+        norms = _np.sqrt((m * m).sum(axis=1))
+        norms[norms == 0] = 1e-9
+        self._mat = _np.ascontiguousarray(m / norms[:, None], dtype=_np.float32)
+        n, d = self._mat.shape
+        self._dim = d
+        self._ids = list(ids)
+        self._row = {k: i for i, k in enumerate(self._ids)}
+        self._payloads = list(payloads)
+        self._seq = list(range(n))
+        self._dims = [d] * n
+        self._next_seq = n
+
     # ── numpy 存储细节 ─────────────────────
 
     def _np_put(self, r: int, unit: list[float]) -> None:

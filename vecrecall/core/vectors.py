@@ -105,9 +105,22 @@ class SqliteVectorBackend(VectorBackend):
             return self._index
         from vecrecall.core.dense import DenseIndex
         idx = DenseIndex(self._use_numpy)
-        for seq, (mid, dim, blob, payload) in enumerate(self._conn.execute(
-                "SELECT id, dim, vec, payload FROM vectors ORDER BY rowid")):
-            idx.upsert(mid, _decode_vec(dim, blob), json.loads(payload), seq=seq)
+        rows = self._conn.execute(
+            "SELECT id, dim, vec, payload FROM vectors ORDER BY rowid").fetchall()
+        dims = {r[1] for r in rows}
+        if idx.use_numpy and len(dims) == 1 and next(iter(dims)) > 0:
+            # 快速路径：整表一次解码、一次归一化（10 万条约快一个数量级）
+            import numpy as np
+            dim = next(iter(dims))
+            if all(len(r[2]) == dim * 4 for r in rows):
+                mat = np.frombuffer(b"".join(r[2] for r in rows), dtype="<f4").reshape(-1, dim)
+            else:                                   # 新旧格式混存
+                mat = np.stack([np.frombuffer(r[2], dtype="<f4" if len(r[2]) == dim * 4 else "<f8")
+                                for r in rows])
+            idx.bulk_load([r[0] for r in rows], mat, [json.loads(r[3]) for r in rows])
+        else:
+            for seq, (mid, dim, blob, payload) in enumerate(rows):
+                idx.upsert(mid, _decode_vec(dim, blob), json.loads(payload), seq=seq)
         self._index = idx
         self._data_version = ver
         return idx
