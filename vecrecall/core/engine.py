@@ -252,6 +252,9 @@ class VecRecall:
         # 豁免：retention_policy=immutable（审计记忆）语义再相似也各存各的，
         # 两笔金额差一分的审批决策是不同的审计事实，绝不能合并 occurrences。
         do_dedup = self.dedup if dedup is None else dedup
+        # 钩子可通过 metadata["_no_dedup"] 要求本条不参与去重（标记本身不落盘）
+        if meta.pop("_no_dedup", False):
+            do_dedup = False
         if do_dedup and retention_policy != "immutable":
             existing = self._dedup_candidate(content)
             if existing is not None:
