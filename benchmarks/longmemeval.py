@@ -32,6 +32,8 @@ LongMemEval（ICLR 2025）为每道题提供一段带时间戳的多会话聊天
     hybrid  search(hybrid=True)：相似度 + 重要性 + 时间新鲜度重排
     dedup   开启写入时语义去重合并（默认阈值 0.92），观察去重对召回的影响
     graph   启发式抽取实体入图，用 graph_search 的直接命中 + 图谱扩展结果排序
+    bm25    纯 BM25 词法检索
+    rrf     向量与 BM25 各取候选，按名次用 RRF 融合（k=60）
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ from vecrecall.core.engine import (  # noqa: E402
 from vecrecall.core.extractor import HeuristicExtractor  # noqa: E402
 from _metrics import average, dedupe, percentile, score  # noqa: E402
 
-CONFIGS = ("vector", "hybrid", "dedup", "graph")
+CONFIGS = ("vector", "hybrid", "dedup", "graph", "bm25", "rrf")
 KS = (1, 5, 10)
 
 
@@ -169,7 +171,8 @@ def eval_question(q: dict, config: str, embedder, granularity: str,
             # hybrid 的时间新鲜度以「提问时刻」为基准：LongMemEval 的会话都在过去，
             # 若按当前时间计算，所有记忆的新鲜度都接近 0，hybrid 就退化成纯向量
             res = p.search(q["question"], n=k_max, hybrid=(config == "hybrid"),
-                           as_of=parse_date(q.get("question_date")))
+                           as_of=parse_date(q.get("question_date")),
+                           mode=config if config in ("bm25", "rrf") else "vector")
             contents = [r.memory.content for r in res]
             ranked_mem = [r.memory.id for r in res]
         query_ms = (time.perf_counter() - t0) * 1000

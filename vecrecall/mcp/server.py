@@ -156,6 +156,9 @@ TOOLS = [
                               "description": "可选相似度阈值；不传则始终返回 top-n"},
                 "hybrid": {"type": "boolean", "default": False,
                            "description": "融合相似度+重要性+时间新鲜度重排"},
+                "mode": {"type": "string", "enum": ["vector", "bm25", "rrf"],
+                         "default": "vector",
+                         "description": "vector=纯向量；bm25=纯词法；rrf=向量与 BM25 按名次融合"},
                 "acceptance_query": {"type": "string",
                                      "description": "给结果附加三项验收（同边界/同行为/可执行），不改变排序"},
             },
@@ -580,7 +583,8 @@ class MCPServer:
             results = p.search(args["query"], args.get("n", 10),
                                args.get("min_score"),
                                args.get("hybrid", False),
-                               args.get("acceptance_query"))
+                               args.get("acceptance_query"),
+                               mode=args.get("mode", "vector"))
             return _format_results(results)
 
         elif name == "mp_recall_policy":

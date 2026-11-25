@@ -31,6 +31,7 @@ from vecrecall.core.crypto import Cipher
 from vecrecall.core.forgetting import ForgettingCurve
 from vecrecall.core.temporal_graph import TemporalGraph
 from vecrecall.core.hooks import HookRegistry, load_entry_point_plugins
+from vecrecall.core.lexical import BM25Index, rrf_merge
 # 向后兼容的再导出
 from vecrecall.core.models import (  # noqa: F401
     estimate_tokens, memory_to_dict, Memory, RetrievalResult, ContextBundle,
@@ -67,6 +68,11 @@ class VecRecall:
     L3_TOP_K = 20
     # 混合评分：时间衰减半衰期（天）
     RECENCY_HALF_LIFE_DAYS = 30.0
+    # 检索模式：vector（纯向量，默认）/ bm25（纯词法）/ rrf（向量 + BM25 名次融合）
+    SEARCH_MODES = ("vector", "bm25", "rrf")
+    # RRF 平滑常数与每路候选数倍率（每路取 n × 倍率 条再融合）
+    RRF_K = 60
+    RRF_CANDIDATES = 3
 
     def __init__(
         self,
@@ -135,6 +141,9 @@ class VecRecall:
 
         # 遗忘曲线：记忆强度随时间衰减（艾宾浩斯曲线），供检索加权与遗忘清理
         self._forgetting = ForgettingCurve()
+
+        # 词法索引：首次 bm25 / rrf 检索时从 SQLite 原文构建，之后增量维护
+        self._bm25: BM25Index | None = None
 
         # 可选哈希链：写入记忆时同步生成防篡改区块
         self._chain = None
@@ -268,6 +277,7 @@ class VecRecall:
 
         # 2. 元数据 + 原文持久化到 SQLite
         self._kg.save(mem)
+        self._bm25_add(mem.id, content)
 
         # 3. 时序知识图谱：实体/关系/状态演化
         self._ingest_graph(ext, mem.id, mem.timestamp)
@@ -362,6 +372,7 @@ class VecRecall:
         memory_types: list[str] | None = None,
         viewer: str | None = None,
         as_of: float | None = None,
+        mode: str = "vector",
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
@@ -403,7 +414,7 @@ class VecRecall:
         l3_results: list[RetrievalResult] = []
         if load_l3 and current_query.strip():
             l3_results = self._deep_search(current_query, self.L3_TOP_K,
-                                           hybrid=hybrid, as_of=as_of)
+                                           hybrid=hybrid, as_of=as_of, mode=mode)
 
         # 类型过滤：一处实现，L1/L2/L3 三层统一生效
         if memory_types is not None:
@@ -468,7 +479,8 @@ class VecRecall:
 
     def _deep_search(self, query: str, n: int, min_score: float | None = None,
                      hybrid: bool = False,
-                     as_of: float | None = None) -> list[RetrievalResult]:
+                     as_of: float | None = None,
+                     mode: str = "vector") -> list[RetrievalResult]:
         """
         L3 全量语义检索：直接命中向量库，无任何过滤条件，
         召回率（R@5）由嵌入质量决定，可用 benchmarks/benchmark_recall.py 复现评测。
@@ -478,6 +490,11 @@ class VecRecall:
         余弦相似度取值 [-1, 1]：词法哈希嵌入在两段文本没有共同词时，相似度会在 0
         附近正负波动，若默认按 0 截断，排在后面的真正答案会被直接丢掉。
         """
+        if mode not in self.SEARCH_MODES:
+            raise ValueError(f"非法 mode: {mode}（可选 {', '.join(self.SEARCH_MODES)}）")
+        if mode != "vector":
+            return self._lexical_search(query, n, mode=mode, min_score=min_score,
+                                        hybrid=hybrid, as_of=as_of)
         vec = self._emb.embed(query)
         threshold = float("-inf") if min_score is None else min_score
         raw = self._vec.query(vec, n=n, min_score=threshold)
@@ -498,6 +515,55 @@ class VecRecall:
                 ))
 
         results.sort(key=lambda x: x.score, reverse=True)
+        return results
+
+    # ── 词法检索 / RRF ────────────────────────
+
+    def _bm25_index(self) -> BM25Index:
+        """取词法索引；首次使用时从 SQLite 原文构建。"""
+        if self._bm25 is None:
+            idx = BM25Index()
+            for m in self._kg.iter_all():
+                idx.add(m.id, m.content)
+            self._bm25 = idx
+        return self._bm25
+
+    def _bm25_add(self, memory_id: str, content: str) -> None:
+        """写入路径同步：索引已构建时增量更新，未构建时什么也不做。"""
+        if self._bm25 is not None:
+            self._bm25.add(memory_id, content)
+
+    def _lexical_search(self, query: str, n: int, mode: str,
+                        min_score: float | None = None, hybrid: bool = False,
+                        as_of: float | None = None) -> list[RetrievalResult]:
+        """bm25：纯词法；rrf：向量与 BM25 各取 n×RRF_CANDIDATES 条，按名次融合。
+
+        hybrid=True 时把融合后的名次当作「相似度」再做重要性 + 新鲜度重排，
+        名次分数先归一到 [0, 1]，避免 RRF 分数（约 0.01–0.03）被其他两项压过。
+        """
+        pool = max(n * self.RRF_CANDIDATES, n)
+        lex = self._bm25_index().search(query, pool)
+        if mode == "bm25":
+            fused = lex[:n]
+        else:
+            vec_ids = [r.memory.id for r in
+                       self._deep_search(query, pool, min_score=min_score)]
+            fused = rrf_merge([vec_ids, [d for d, _ in lex]], k=self.RRF_K)[:n]
+
+        mem_map = self._kg.get_many([d for d, _ in fused])
+        results: list[RetrievalResult] = []
+        top = fused[0][1] if fused else 1.0
+        for rank, (mid, sc) in enumerate(fused):
+            m = mem_map.get(mid)
+            if m is None:
+                continue
+            if self.owner and not self._visible_to(m, self.owner):
+                continue
+            if hybrid:
+                sc = self._hybrid_score(sc / top if top else 0.0, m, as_of)
+            results.append(RetrievalResult(memory=m, score=sc, layer="L3"))
+        if hybrid:
+            results.sort(key=lambda r: r.score, reverse=True)
         return results
 
     def _hybrid_score(self, sim: float, mem: Memory,
@@ -546,17 +612,21 @@ class VecRecall:
     def search(self, query: str, n: int = 10, min_score: float | None = None,
                hybrid: bool = False,
                acceptance_query: str | None = None,
-               as_of: float | None = None) -> list[RetrievalResult]:
+               as_of: float | None = None,
+               mode: str = "vector") -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
 
         min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
         as_of：hybrid 计算时间新鲜度的参考时刻（epoch 秒），默认当前时间。
+        mode：vector（默认，纯向量）/ bm25（纯词法）/ rrf（向量与 BM25 按名次融合）。
+            bm25 / rrf 下 score 分别是 BM25 分数和 RRF 分数，与余弦相似度不可比；
+            min_score 只作用于向量路。
 
         acceptance_query 给定时，对每条结果附加三项验收（同边界/同行为/
         可执行），不改变召回和排序，调用方自行决定是否采信。
         """
         results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid,
-                                    as_of=as_of)
+                                    as_of=as_of, mode=mode)
         results = self._filter_results(results)
         if acceptance_query is not None:
             from vecrecall.core.recall_policy import evaluate_memory
@@ -692,6 +762,7 @@ class VecRecall:
         )
         self._vec.upsert(mem.id, self._emb.embed(mem.content), {"id": mem.id})
         self._kg.save(mem)
+        self._bm25_add(mem.id, mem.content)
         if self._extractor is not None:
             self._ingest_graph(self._extractor.extract(mem.content),
                                mem.id, mem.timestamp)
@@ -833,6 +904,7 @@ class VecRecall:
             m.content = content
             vec = self._emb.embed(content)
             self._vec.upsert(m.id, vec, {"id": m.id})
+            self._bm25_add(m.id, content)
         if topic is not None:
             m.topic = topic
         if importance is not None:
@@ -851,6 +923,8 @@ class VecRecall:
             return False
         self._vec.delete(memory_id)
         self._kg.delete(memory_id)
+        if self._bm25 is not None:
+            self._bm25.remove(memory_id)
         self.hooks.run_on_delete(memory_id)
         return True
 
@@ -904,6 +978,7 @@ class VecRecall:
         for m in self._kg.iter_all():
             self._vec.upsert(m.id, self._emb.embed(m.content), {"id": m.id})
             count += 1
+        self._bm25 = None   # 词法索引下次检索时从原文重建
         return count
 
     # ── 防篡改验证（可选区块链）──────────────

@@ -307,7 +307,8 @@ def cmd_search(args, cfg):
     elif layer == "l2":
         results = p._semantic_l2(args.query, hybrid=hybrid)
     else:
-        results = p.search(args.query, args.n or 10, hybrid=hybrid)
+        results = p.search(args.query, args.n or 10, hybrid=hybrid,
+                           mode=getattr(args, "mode", "vector"))
 
     _print_results(results, verbose=args.verbose)
     print(f"\n  共 {len(results)} 条结果")
@@ -888,6 +889,8 @@ def main():
     p_search.add_argument("--layer", choices=["l1", "l2", "l3"], default="l3")
     p_search.add_argument("--hybrid", action="store_true",
                           help="融合相似度+重要性+时间新鲜度重排")
+    p_search.add_argument("--mode", choices=["vector", "bm25", "rrf"], default="vector",
+                          help="vector=纯向量（默认）；bm25=纯词法；rrf=向量与 BM25 按名次融合")
     p_search.add_argument("--verbose", action="store_true")
 
     # context
