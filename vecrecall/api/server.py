@@ -239,7 +239,7 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
             results = p.search(
                 body["query"], body.get("n", 10),
                 body.get("min_score"), body.get("hybrid", False),
-                mode=body.get("mode", "vector"),
+                mode=body.get("mode"),
             )
             return {"results": [
                 {**memory_to_dict(r.memory),

@@ -68,7 +68,8 @@ class VecRecall:
     L3_TOP_K = 20
     # 混合评分：时间衰减半衰期（天）
     RECENCY_HALF_LIFE_DAYS = 30.0
-    # 检索模式：vector（纯向量，默认）/ bm25（纯词法）/ rrf（向量 + BM25 名次融合）
+    # 检索模式：vector（纯向量）/ bm25（纯词法）/ rrf（向量 + BM25 名次融合，v2.3 起默认）
+    DEFAULT_SEARCH_MODE = "rrf"
     SEARCH_MODES = ("vector", "bm25", "rrf")
     # RRF 平滑常数与每路候选数倍率（每路取 n × 倍率 条再融合）
     RRF_K = 60
@@ -372,7 +373,7 @@ class VecRecall:
         memory_types: list[str] | None = None,
         viewer: str | None = None,
         as_of: float | None = None,
-        mode: str = "vector",
+        mode: str | None = None,
     ) -> ContextBundle:
         """
         构建完整的四层上下文 bundle。
@@ -414,7 +415,8 @@ class VecRecall:
         l3_results: list[RetrievalResult] = []
         if load_l3 and current_query.strip():
             l3_results = self._deep_search(current_query, self.L3_TOP_K,
-                                           hybrid=hybrid, as_of=as_of, mode=mode)
+                                           hybrid=hybrid, as_of=as_of,
+                                           mode=mode or self.DEFAULT_SEARCH_MODE)
 
         # 类型过滤：一处实现，L1/L2/L3 三层统一生效
         if memory_types is not None:
@@ -613,12 +615,13 @@ class VecRecall:
                hybrid: bool = False,
                acceptance_query: str | None = None,
                as_of: float | None = None,
-               mode: str = "vector") -> list[RetrievalResult]:
+               mode: str | None = None) -> list[RetrievalResult]:
         """直接语义搜索，不经过任何结构过滤；hybrid=True 启用融合重排。
 
         min_score=None（默认）始终返回 top-n；显式给定时才丢弃低于阈值的结果。
         as_of：hybrid 计算时间新鲜度的参考时刻（epoch 秒），默认当前时间。
-        mode：vector（默认，纯向量）/ bm25（纯词法）/ rrf（向量与 BM25 按名次融合）。
+        mode：rrf（默认，向量与 BM25 按名次融合）/ vector（纯向量）/ bm25（纯词法）。
+            None 时使用 DEFAULT_SEARCH_MODE。
             bm25 / rrf 下 score 分别是 BM25 分数和 RRF 分数，与余弦相似度不可比；
             min_score 只作用于向量路。
 
@@ -626,7 +629,7 @@ class VecRecall:
         可执行），不改变召回和排序，调用方自行决定是否采信。
         """
         results = self._deep_search(query, n, min_score=min_score, hybrid=hybrid,
-                                    as_of=as_of, mode=mode)
+                                    as_of=as_of, mode=mode or self.DEFAULT_SEARCH_MODE)
         results = self._filter_results(results)
         if acceptance_query is not None:
             from vecrecall.core.recall_policy import evaluate_memory

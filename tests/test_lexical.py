@@ -107,7 +107,7 @@ def test_engine_modes() -> None:
         res = p.search("connection pool", n=3, mode="rrf")
         test("rrf 返回并集、首位正确", res[0].memory.id == a.id and len(res) == 3, str(len(res)))
         test("rrf 层标记", all(r.layer == "L3" for r in res))
-        test("默认仍是 vector", len(p.search("connection pool", n=3)) == 3)
+        test("默认是 rrf（返回两路并集）", len(p.search("connection pool", n=3)) == 3)
 
         try:
             p.search("x", mode="fuzzy")

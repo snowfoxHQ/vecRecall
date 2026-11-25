@@ -85,7 +85,7 @@ def test_basic_add_and_retrieve():
         test("importance 正确", m.importance == 0.8)
         test("topic 正确", m.topic == "preferences")
 
-        results = p.search("深色主题", n=5)
+        results = p.search("深色主题", n=5, mode="vector")
         test("搜索返回结果", len(results) > 0)
         test("结果有 score 字段", hasattr(results[0], "score"))
         test("score 在 0-1 之间", 0 <= results[0].score <= 1)
@@ -487,7 +487,7 @@ def test_update_and_delete_lifecycle():
 
         # 更新后的内容应能被检索到（重向量化生效）
         r_new = p.search("内存缓存", n=5)
-        r_old = p.search("Redis", n=5)
+        r_old = p.search("Redis", n=5, mode="vector")
         test("新内容可检索", len(r_new) > 0)
         test("旧内容不再命中", all("Redis" not in x.memory.content for x in r_old)
              or r_old[0].score < 0.5)
@@ -545,8 +545,8 @@ def test_hybrid_scoring():
         p.add(content="认证模块使用 JWT 令牌", topic="auth", importance=0.95)
         p.add(content="认证模块也使用 JWT 令牌", topic="auth", importance=0.1)
 
-        pure = p.search("JWT 认证", n=2, hybrid=False)
-        hybrid = p.search("JWT 认证", n=2, hybrid=True)
+        pure = p.search("JWT 认证", n=2, hybrid=False, mode="vector")
+        hybrid = p.search("JWT 认证", n=2, hybrid=True, mode="vector")
 
         test("纯向量返回 2 条", len(pure) == 2)
         test("hybrid 也返回 2 条（不改变召回集合）", len(hybrid) == 2)
@@ -1385,9 +1385,9 @@ def test_hybrid_as_of():
         p._kg.save(new)
 
         q = "项目部署方案"
-        pure = p.search(q, n=2)
-        now_based = p.search(q, n=2, hybrid=True)
-        at_q = p.search(q, n=2, hybrid=True, as_of=base)
+        pure = p.search(q, n=2, mode="vector")
+        now_based = p.search(q, n=2, hybrid=True, mode="vector")
+        at_q = p.search(q, n=2, hybrid=True, as_of=base, mode="vector")
 
         def gap(res):
             s = {r.memory.id: r.score for r in res}
@@ -1406,7 +1406,7 @@ def test_hybrid_as_of():
              {r.memory.id for r in at_q} == {r.memory.id for r in pure})
 
         ctx = p.build_context(current_query=q, load_l2=False, load_l3=True,
-                              hybrid=True, as_of=base)
+                              hybrid=True, as_of=base, mode="vector")
         test("build_context 透传 as_of", ctx.l3_deep_results[0].memory.id == new.id)
         p.close()
 
@@ -1441,11 +1441,37 @@ def test_search_returns_topn_with_negative_scores():
         test("默认 search 返回全部 4 条", len(res) == 4, str(len(res)))
         test("答案记忆在结果中", ids[1] in [r.memory.id for r in res])
 
-        res_thr = p.search(q, n=5, min_score=0.0)
+        res_thr = p.search(q, n=5, min_score=0.0, mode="vector")
         test("显式 min_score=0.0 仍可截断", all(r.score >= 0.0 for r in res_thr))
 
         ctx = p.build_context(current_query=q, load_l2=False, load_l3=True)
         test("L3 也返回全部 4 条", len(ctx.l3_deep_results) == 4)
+        p.close()
+
+
+def test_default_search_mode():
+    """v2.3：默认检索模式为 rrf；可通过 mode 或 DEFAULT_SEARCH_MODE 切回 vector。"""
+    print("\n── 默认检索模式 ──")
+    test("默认 rrf", VecRecall.DEFAULT_SEARCH_MODE == "rrf")
+    with tempfile.TemporaryDirectory() as d:
+        p = make_palace(d)
+        a = p.add("PostgreSQL 连接池最大连接数设为 100", dedup=False)
+        p.add("周末计划去爬山", dedup=False)
+        p.add("中午吃了一碗牛肉面", dedup=False)
+        default = p.search("连接池", n=3)
+        rrf = p.search("连接池", n=3, mode="rrf")
+        vec = p.search("连接池", n=3, mode="vector")
+        test("不传 mode 等同 rrf",
+             [r.memory.id for r in default] == [r.memory.id for r in rrf])
+        test("rrf 首位正确", default and default[0].memory.id == a.id)
+        test("rrf 分数是名次分数（远小于 1）", default[0].score < 0.1, str(default[0].score))
+        test("vector 分数是余弦相似度", vec[0].score > default[0].score)
+        p.DEFAULT_SEARCH_MODE = "vector"
+        test("实例级改回 vector",
+             [r.score for r in p.search("连接池", n=3)] == [r.score for r in vec])
+        ctx = p.build_context(current_query="连接池", load_l2=False, load_l3=True)
+        test("build_context 跟随 DEFAULT_SEARCH_MODE",
+             ctx.l3_deep_results[0].score == vec[0].score)
         p.close()
 
 
@@ -1598,6 +1624,7 @@ def run_all():
     test_topic_key_chains()
     test_hybrid_as_of()
     test_search_returns_topn_with_negative_scores()
+    test_default_search_mode()
     test_extension_hooks()
     test_core_has_no_scenario_schema()
 
