@@ -56,6 +56,34 @@ def off_boundary(res, min_score, eps=1e-6):
     return [x for x in res if abs(x[1] - min_score) > eps]
 
 
+def same_order(a, b, insertion, n, eps=1e-9):
+    """名次一致（含同分按写入顺序）。
+
+    预先归一化再点积与「点积 / 范数」的舍入不同，数学上相等的两个分数可能差 1e-16，
+    排序时就会互换；不同 Python 版本的 sum() 精度也不同（3.12 起用补偿求和）。
+    所以分数差在 eps 内的视为同分，按写入顺序比较；结果被 n 截断时，
+    与第 n 名同分的条目谁进谁出都算对。
+    """
+    pos = {k: i for i, k in enumerate(insertion)}
+
+    def canon(res):
+        out, i = [], 0
+        while i < len(res):
+            j = i
+            while j + 1 < len(res) and abs(res[j + 1][1] - res[i][1]) < eps:
+                j += 1
+            out.append(sorted(x[0] for x in res[i:j + 1]))
+            i = j + 1
+        return out
+
+    ca, cb = canon(a), canon(b)
+    if len(a) == n and len(b) == n and ca and cb:   # 最后一组可能被截断
+        ca, cb = ca[:-1], cb[:-1]
+    return len(a) == len(b) and ca == cb and all(
+        [x[0] for x in a if x[0] in g] == sorted((y for y in g), key=pos.get)
+        for g in map(set, ca))
+
+
 def random_ops(idx_upsert, idx_delete, rng, n, dim):
     store = {}
     for i in range(n):
@@ -90,8 +118,8 @@ def check_index(use_numpy):
             if ms is not None and (len(a) < n or len(b) < n):
                 a, b = off_boundary(a, ms), off_boundary(b, ms)
             ok_scores &= close(a, b)
-            if not use_numpy:   # 纯 Python 是 float64，名次（含同分顺序）应完全一致
-                ok_ids &= [x[0] for x in a] == [x[0] for x in b]
+            if not use_numpy:   # 纯 Python 是 float64，名次（含同分顺序）应一致
+                ok_ids &= same_order(a, b, list(store), n)
     test(f"[{label}] 随机增删改后分数与旧实现一致", ok_scores)
     if not use_numpy:
         test(f"[{label}] 名次与同分顺序与旧实现完全一致", ok_ids)

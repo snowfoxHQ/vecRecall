@@ -44,6 +44,7 @@ class DenseIndex:
         self._dim: int | None = None        # 矩阵维度；出现不同维度时置为 -1（走通用路径）
         # 纯 Python 存储
         self._vecs: list[list[float]] = []
+        self._ragged: dict | None = None   # 维度不一致时保存原始单位向量（行号 → list）
 
     # ── 维护 ──────────────────────────────
 
@@ -113,8 +114,6 @@ class DenseIndex:
             self._ragged.pop(last, None)
 
     # ── numpy 存储细节 ─────────────────────
-
-    _ragged: dict | None = None            # 维度不一致时保存原始单位向量（行号 → list）
 
     def _np_put(self, r: int, unit: list[float]) -> None:
         d = len(unit)
