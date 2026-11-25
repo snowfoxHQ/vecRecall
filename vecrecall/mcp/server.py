@@ -550,7 +550,7 @@ class MCPServer:
             _ok(req_id, {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "vecrecall", "version": "2.4.0"},
+                "serverInfo": {"name": "vecrecall", "version": "2.5.0"},
             })
         elif method == "tools/list":
             _ok(req_id, {"tools": TOOLS})
