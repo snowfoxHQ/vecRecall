@@ -52,8 +52,20 @@ TOOLS = [
                 "importance": {"type": "number", "description": "重要性 0-1，留空则自动评分"},
                 "session_id": {"type": "string", "description": "当前会话 ID"},
                 "ui_summary": {"type": "string", "description": "AAAK 压缩摘要（仅供 UI 展示，不参与检索）"},
+                "provenance": {"type": "object",
+                               "description": "来源信息（可选），如 {\"agent\": \"reviewer\", \"source_ref\": \"PR#42\"}；"
+                                              "写入入口、会话和时间会自动记录"},
             },
             "required": ["content"],
+        },
+    },
+    {
+        "name": "mp_provenance",
+        "description": "查看一条记忆的来源：谁、从哪个入口、在哪个会话第几轮写入，重复写入记录，取代与蒸馏关系",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"memory_id": {"type": "string"}},
+            "required": ["memory_id"],
         },
     },
     {
@@ -516,6 +528,7 @@ class MCPServer:
             extractor=extractor,
             encryption_key=encryption_key,
         )
+        self._palace.DEFAULT_VIA = "mcp"
         self._wing = wing
         self._base_dir = os.path.realpath(base_dir)
 
@@ -566,6 +579,9 @@ class MCPServer:
             m = p.add(**{k: v for k, v in args.items()})
             return {"id": m.id, "wing": m.wing, "topic": m.topic,
                     "importance": m.importance, "ok": True}
+
+        elif name == "mp_provenance":
+            return p.provenance(args["memory_id"])
 
         elif name == "mp_add_batch":
             ms = p.add_batch(args["items"])
@@ -725,7 +741,8 @@ class MCPServer:
         elif name == "mp_diary_write":
             agent_wing = f"agent:{args['agent_name']}"
             m = p.add(content=args["content"], topic=args.get("topic", "diary"),
-                      wing=agent_wing)
+                      wing=agent_wing,
+                      provenance={"agent": args["agent_name"], "kind": "diary"})
             return {"id": m.id, "agent": args["agent_name"]}
 
         elif name == "mp_diary_read":

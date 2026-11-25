@@ -79,6 +79,10 @@ class VecRecall:
     CONTRADICTION_MIN_SIM = 0.2
     CONTRADICTION_CANDIDATES = 5
     SUPERSEDED_WEIGHT = 0.5
+    # 来源追踪（v2.5）：写入入口标识；MCP / REST / CLI 启动时改成 mcp / rest / cli
+    DEFAULT_VIA = "python"
+    # 去重合并时最多保留多少条「重复来源」记录
+    PROVENANCE_MAX_MERGES = 20
 
     def __init__(
         self,
@@ -176,7 +180,8 @@ class VecRecall:
             owner: str = "", retention_policy: str = "decay",
             scenario_tags: list[str] | None = None,
             policy_version: str | None = None,
-            topic_key: str = "") -> Memory:
+            topic_key: str = "",
+            provenance: dict | None = None) -> Memory:
         """
         存入一条记忆。
 
@@ -246,6 +251,7 @@ class VecRecall:
             importance = self._heuristic_importance(content)
 
         meta = dict(metadata or {})
+        prov = self._build_provenance(provenance, meta, session_id, owner)
         if redaction_counts:
             meta["redaction_counts"] = redaction_counts
         if self.redact_payloads and retention_policy == "immutable":
@@ -275,6 +281,7 @@ class VecRecall:
                 existing.importance = max(existing.importance, importance)
                 existing.metadata["occurrences"] = \
                     existing.metadata.get("occurrences", 1) + 1
+                self._record_merge(existing, prov)
                 self._kg.save(existing)
                 self._ingest_graph(ext, existing.id, existing.timestamp)
                 self.hooks.run_after_write(existing, True)
@@ -288,6 +295,7 @@ class VecRecall:
         else:
             meta.pop("_no_contradiction", None)
 
+        meta["provenance"] = prov
         mem = Memory.create(
             wing=w, topic=topic, content=content,
             session_id=session_id, importance=importance,
@@ -814,7 +822,9 @@ class VecRecall:
             content=plan["summary"], importance=plan["importance"],
             ui_summary=plan["summary"],
             metadata={"distilled": True, "sources": sources,
-                      "distilled_at": time.time()},
+                      "distilled_at": time.time(),
+                      "provenance": self._build_provenance(
+                          {"via": "distill", "derived_from": list(sources)}, {}, "", "")},
         )
         self._vec.upsert(mem.id, self._emb.embed(mem.content), {"id": mem.id})
         self._kg.save(mem)
@@ -1091,6 +1101,90 @@ class VecRecall:
         return s
 
     # ── 辅助 ──────────────────────────────────
+
+    # ── 来源追踪 ──────────────────────────────
+
+    # 只有这些键由引擎维护；调用方可以补充其他键（如 source_ref、channel、message_id）
+    _PROVENANCE_ENGINE_KEYS = ("created_at",)
+
+    def _build_provenance(self, given: dict | None, meta: dict,
+                          session_id: str, owner: str) -> dict:
+        """组装来源记录：写入入口、写入者、会话、轮次、时间，以及调用方补充的字段。
+
+        优先级：引擎维护的 created_at > provenance 参数 > metadata["provenance"] > 默认值。
+        metadata 里的 turn_index / role（archive_session 写入）会同步进来。
+        """
+        prov: dict = {"via": self.DEFAULT_VIA}
+        agent = owner or self.owner
+        if agent:
+            prov["agent"] = agent
+        if session_id:
+            prov["session_id"] = session_id
+        for k in ("turn_index", "role"):
+            if k in meta:
+                prov[k] = meta[k]
+        old = meta.pop("provenance", None)
+        if isinstance(old, dict):
+            prov.update(old)
+        if given:
+            if not isinstance(given, dict):
+                raise TypeError("provenance 必须是 dict")
+            prov.update(given)
+        for k in self._PROVENANCE_ENGINE_KEYS:
+            prov.pop(k, None)
+        prov["created_at"] = time.time()
+        return {k: v for k, v in prov.items() if v is not None and v != ""}
+
+    def _record_merge(self, existing: Memory, prov: dict) -> None:
+        """去重合并时记下这次重复写入的来源（最多保留 PROVENANCE_MAX_MERGES 条，超出计数）。"""
+        merges = list(existing.metadata.get("merged_from") or [])
+        entry = {k: prov[k] for k in ("via", "agent", "session_id", "turn_index", "source_ref")
+                 if k in prov}
+        entry["at"] = prov.get("created_at", time.time())
+        if len(merges) < self.PROVENANCE_MAX_MERGES:
+            merges.append(entry)
+        else:
+            existing.metadata["merged_dropped"] = existing.metadata.get("merged_dropped", 0) + 1
+        existing.metadata["merged_from"] = merges
+
+    def provenance(self, memory_id: str) -> dict:
+        """一条记忆的完整来源：写入来源、重复写入、取代关系、蒸馏来源。
+
+        v2.4 及更早写入的记忆没有 provenance，返回的 origin 只含能从字段推断的内容
+        （session_id / owner / 写入时间），并标记 legacy=True。
+        """
+        m = self._kg.get(memory_id)
+        if not m:
+            raise ValueError(f"记忆不存在: {memory_id}")
+        if self.owner and not self._visible_to(m, self.owner):
+            raise ValueError(f"记忆不存在: {memory_id}")
+        md = m.metadata
+        origin = md.get("provenance")
+        if not origin:
+            origin = {"legacy": True, "created_at": m.timestamp}
+            if m.session_id:
+                origin["session_id"] = m.session_id
+            if m.owner:
+                origin["agent"] = m.owner
+            if "turn_index" in md:
+                origin["turn_index"] = md["turn_index"]
+            if md.get("source"):
+                origin["via"] = md["source"]
+        out = {
+            "id": m.id,
+            "origin": origin,
+            "occurrences": md.get("occurrences", 1),
+            "merged_from": md.get("merged_from", []),
+            "superseded_by": md.get("superseded_by"),
+            "supersedes": md.get("supersedes", []),
+        }
+        if md.get("merged_dropped"):
+            out["merged_dropped"] = md["merged_dropped"]
+        if md.get("distilled"):
+            out["derived_from"] = md.get("sources", [])
+        if md.get("distilled_into"):
+            out["distilled_into"] = md["distilled_into"]
+        return out
 
     # ── 矛盾检测 ──────────────────────────────
 

@@ -175,6 +175,7 @@ The detailed guide is in Chinese: [docs/guide.md](https://github.com/snowfoxHQ/v
 |---|---|
 | Cognitive layer | Extracts topic, importance, summary, entities and relations on write; heuristic (zero-dependency) or an Ollama / OpenAI-compatible LLM |
 | Contradiction detection | When a new memory overrides an old one ("switched the primary DB from PostgreSQL to MySQL"), the old one is marked superseded and down-weighted in search, never deleted; an LLM judge can be plugged in | [Guide (zh)](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#矛盾检测) |
+| Provenance | Every memory records its entry point (python / mcp / rest / cli), agent, session, turn and time; duplicate writes, supersession and distillation are traceable | [Guide (zh)](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#来源追踪) |
 | Semantic dedup | Merges into an existing memory when similarity ≥ 0.92, incrementing its count |
 | Temporal knowledge graph | Tracks entities, relations and how attributes change over time |
 | Multi-hop search | Expands vector hits along entity relations and returns evidence paths |
@@ -196,7 +197,7 @@ The detailed guide is in Chinese: [docs/guide.md](https://github.com/snowfoxHQ/v
 | Interface | Entry point | Notes |
 |---|---|---|
 | Python | `from vecrecall import VecRecall` | everything |
-| MCP | `vr-mcp` / `vr mcp` | 36 tools, for Claude Code, Gemini CLI and other MCP clients |
+| MCP | `vr-mcp` / `vr mcp` | 37 tools, for Claude Code, Gemini CLI and other MCP clients |
 | REST | `vr-api` / `vr api` | zero-dependency HTTP JSON API, `127.0.0.1:8791` by default |
 | CLI | `vr` | 31 subcommands |
 

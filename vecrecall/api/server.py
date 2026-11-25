@@ -202,6 +202,8 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
                     full=q.get("full", ["0"])[0].lower() in ("1", "true", "yes"),
                     sort=q.get("sort", ["importance"])[0],
                 )
+            if len(segs) == 3 and segs[2] == "provenance":
+                return p.provenance(segs[1])
             m = p._kg.get(segs[1])
             if not m:
                 raise ValueError(f"记忆不存在: {segs[1]}")
@@ -231,6 +233,7 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
                 session_id=body.get("session_id", ""),
                 ui_summary=body.get("ui_summary", ""),
                 metadata=body.get("metadata"),
+                provenance=body.get("provenance"),
             )
             return {"ok": True, "id": m.id, "wing": m.wing,
                     "topic": m.topic, "importance": m.importance}
@@ -350,6 +353,7 @@ def main():
         base_dir=args.dir, wing=args.wing,
         use_blockchain=args.chain, embedding_backend=emb,
     )
+    palace.DEFAULT_VIA = "rest"
 
     server = VecRecallHTTPServer((args.host, args.port), palace,
                                  api_key=api_key, cors_origin=args.cors_origin)

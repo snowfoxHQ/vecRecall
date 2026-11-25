@@ -28,7 +28,7 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 }
 ```
 
-## MCP 工具列表（共 36 个）
+## MCP 工具列表（共 37 个）
 
 **检索决策**
 - `mp_recall_policy` — 判断当前任务是否值得检索，并给出规范化查询意图
@@ -58,6 +58,7 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 - `mp_browse_wing` — 浏览某个 wing
 - `mp_browse_topic` — 浏览某个话题
 - `mp_get_memory` — 按 ID 获取记忆
+- `mp_provenance` — 查看记忆来源（入口、Agent、会话、轮次、重复写入、取代与蒸馏关系）
 
 **知识图谱**
 - `mp_link` — 建立跨 wing 关联（v2.2 起仅对双方均为 shared 的记忆开放）
@@ -125,7 +126,7 @@ curl -X POST $BASE/context \
 curl -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/memories/<id>  # 删除
 ```
 
-完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`。所有响应均为 JSON。
+完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
 
 `POST /search` 支持 `mode`（`rrf` 默认 / `vector` / `bm25`）、`hybrid`、`min_score`。
 

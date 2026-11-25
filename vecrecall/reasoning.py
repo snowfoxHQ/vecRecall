@@ -305,6 +305,7 @@ class ReasoningEngine:
                 owner=self.palace.owner, dedup=False,
                 metadata={"source": "reasoning", "chain_id": chain.chain_id,
                           "accuracy": result.accuracy, "rating": result.rating},
+                provenance={"via": "reasoning", "chain_id": chain.chain_id},
             )
             return mem.id
         except Exception:  # noqa: BLE001 —— 主库写失败不能让反思本身失败

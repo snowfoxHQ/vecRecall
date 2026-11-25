@@ -117,11 +117,13 @@ def get_palace(cfg: dict, args=None) -> VecRecall:
         model=cfg.get("embed_model"),
         base_url=cfg.get("embed_url"),
     )
-    return VecRecall(base_dir=cfg["dir"], wing=cfg.get("wing", "default"),
-                     use_blockchain=cfg.get("chain", False),
-                     embedding_backend=emb,
-                     extractor=build_extractor_from(cfg, args),
-                     encryption_key=_encryption_key(cfg, args))
+    p = VecRecall(base_dir=cfg["dir"], wing=cfg.get("wing", "default"),
+                  use_blockchain=cfg.get("chain", False),
+                  embedding_backend=emb,
+                  extractor=build_extractor_from(cfg, args),
+                  encryption_key=_encryption_key(cfg, args))
+    p.DEFAULT_VIA = "cli"
+    return p
 
 
 # ─────────────────────────────────────────────
@@ -290,10 +292,36 @@ def cmd_get(args, cfg):
     print(f"  字符数:     {len(mem.content):,}")
     if mem.ui_summary:
         print(f"  摘要:       {mem.ui_summary}")
+    _print_provenance(p, mem)
     print(f"\n{'─' * 50}")
     print(mem.content)
     print(f"{'─' * 50}")
     p.close()
+
+def _print_provenance(p, mem):
+    pv = p.provenance(mem.id)
+    o = pv["origin"]
+    bits = [o.get("via", "未知入口")]
+    if o.get("agent"):
+        bits.append(f"agent={o['agent']}")
+    if o.get("session_id"):
+        bits.append(f"session={str(o['session_id'])[:8]}")
+    if "turn_index" in o:
+        bits.append(f"第 {o['turn_index']} 轮")
+    if o.get("source_ref"):
+        bits.append(f"ref={o['source_ref']}")
+    if o.get("legacy"):
+        bits.append("（v2.4 及更早写入，来源不完整）")
+    print(f"  来源:       {' · '.join(str(b) for b in bits)}")
+    if pv["occurrences"] > 1:
+        print(f"  重复写入:   {pv['occurrences']} 次")
+    if pv.get("superseded_by"):
+        print(f"  已被取代:   {pv['superseded_by'][:8]}（检索时降权）")
+    if pv.get("supersedes"):
+        print(f"  取代了:     {', '.join(x[:8] for x in pv['supersedes'])}")
+    if pv.get("derived_from"):
+        print(f"  蒸馏自:     {len(pv['derived_from'])} 条记忆")
+
 
 def cmd_search(args, cfg):
     p = get_palace(cfg)

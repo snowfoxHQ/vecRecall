@@ -63,6 +63,8 @@ jobs:
         run: python tests/test_reasoning.py
       - name: test_memory_card
         run: python tests/test_memory_card.py
+      - name: test_provenance
+        run: python tests/test_provenance.py
       - name: test_contradiction
         run: python tests/test_contradiction.py
       - name: test_dense (pure Python)

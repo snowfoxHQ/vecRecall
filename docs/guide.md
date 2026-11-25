@@ -82,6 +82,34 @@ vr add "..." --extractor ollama --llm-model llama3.2
 
 抽取结果自动填充记忆的 `topic`、`importance`、`ui_summary`，实体与关系存入 `metadata.entities` / `metadata.relations`（为后续时序知识图谱预留）。LLM 调用失败时自动降级启发式，写入永不阻塞。
 
+## 来源追踪
+
+v2.5 起，每条新记忆在 `metadata["provenance"]` 里记下它从哪里来：
+
+| 字段 | 含义 |
+|---|---|
+| `via` | 写入入口：`python`（默认）/ `mcp` / `rest` / `cli` / `distill` / `reasoning`，可自定义 |
+| `agent` | 写入者：`add(owner=...)`，没传时用实例的 `owner` |
+| `session_id` / `turn_index` / `role` | 会话与轮次（`archive_session()` 自动填写） |
+| `created_at` | 写入时间，由引擎维护，调用方不能覆盖 |
+| 其他 | 调用方补充的任意字段，如 `source_ref`（PR 号、文档路径、消息 ID） |
+
+```python
+m = palace.add("评审意见：users 表要加索引", owner="reviewer",
+               provenance={"source_ref": "PR#42", "channel": "github"})
+
+palace.provenance(m.id)
+# {"id": ..., "origin": {"via": "python", "agent": "reviewer", "source_ref": "PR#42", ...},
+#  "occurrences": 1, "merged_from": [], "superseded_by": None, "supersedes": []}
+```
+
+- **重复写入**：去重合并时，首次来源保留在 `origin`，之后每次重复写入的来源记在 `merged_from`（最多 `PROVENANCE_MAX_MERGES` = 20 条，超出部分计入 `merged_dropped`）。
+- **取代与蒸馏**：`provenance()` 同时返回 `superseded_by` / `supersedes`；蒸馏出的记忆 `via=distill`，`derived_from` 列出源记忆，源记忆有 `distilled_into`。
+- **旧数据**：v2.4 及更早写入的记忆没有 provenance，`provenance()` 会从 `session_id`、`owner`、写入时间推断，并标记 `legacy: True`。
+- **可见性**：看不到的 private 记忆，`provenance()` 同样报「不存在」。
+
+MCP：`mp_add` 支持 `provenance` 参数，`mp_provenance` 查看来源；REST：`POST /memories` 支持 `provenance` 字段，`GET /memories/<id>/provenance`；CLI：`vr get <ID>` 显示来源。
+
 ## 矛盾检测
 
 v2.4 起默认开启。新记忆推翻某条旧记忆时，旧记忆在 metadata 里记下 `superseded_by`（以及原因、置信度、时间），新记忆记下 `supersedes`，检索时旧记忆的分数乘以 `SUPERSEDED_WEIGHT`（默认 0.5）再重排。**不删除任何记忆。**
