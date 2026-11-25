@@ -173,11 +173,16 @@ class TraceStore:
     # ── 读取 ──
 
     def read_events(self, limit: int = 100, operation: str | None = None) -> list[dict]:
-        """按时间倒序返回最近的事件；损坏的行跳过。"""
-        events: list[dict] = []
+        """按时间倒序返回最近的事件；损坏的行跳过。
+
+        同一毫秒内写入的多条事件，按写入顺序的倒序排列（后写的在前），
+        保证结果稳定，不依赖时钟精度。
+        """
+        events: list[tuple[str, int, dict]] = []
         if not self.directory.exists():
-            return events
-        for path in sorted(self.directory.glob("events-*.jsonl"), reverse=True):
+            return []
+        seq = 0
+        for path in sorted(self.directory.glob("events-*.jsonl")):
             try:
                 with open(path, encoding="utf-8") as fh:
                     for line in fh:
@@ -188,12 +193,13 @@ class TraceStore:
                             ev = json.loads(line)
                         except json.JSONDecodeError:
                             continue
+                        seq += 1
                         if operation is None or ev.get("operation") == operation:
-                            events.append(ev)
+                            events.append((ev.get("timestamp", ""), seq, ev))
             except OSError:
                 continue
-        events.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
-        return events[:limit]
+        events.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        return [ev for _ts, _seq, ev in events[:limit]]
 
     def stats(self) -> dict:
         events = self.read_events(limit=100000)

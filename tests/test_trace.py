@@ -96,7 +96,9 @@ def test_store_behaviour() -> None:
         test("event_id 去重", st.emit("x", event_id="e1") == "e1"
              and st.emit("x", event_id="e1") is None)
         st.emit("x", attrs={"api_key": "abc", "nested": {"password": "p", "ok": "v"}})
-        ev = st.read_events(operation="x")[0]
+        xs = st.read_events(operation="x")
+        test("同一毫秒内后写的排在前面", "api_key" in xs[0]["attrs"], str(xs))
+        ev = next(e for e in xs if "api_key" in e["attrs"])
         test("敏感键脱敏",
              ev["attrs"]["api_key"] == "[REDACTED]"
              and ev["attrs"]["nested"]["password"] == "[REDACTED]"
