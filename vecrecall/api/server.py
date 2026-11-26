@@ -45,7 +45,7 @@ from vecrecall.core.engine import (
     VecRecall, build_embedding_backend, memory_to_dict,
 )
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 
 def _err(msg: str) -> dict:
