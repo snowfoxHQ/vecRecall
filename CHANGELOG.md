@@ -2,6 +2,13 @@
 
 最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
+## 未发布（v2.6.1）
+
+### 改动明细
+
+- **三个入口的能力对照表**：新增 `vecrecall/capabilities.py`，登记每项能力在 MCP / REST / CLI 里的名字，缺席的入口写明原因；`tests/test_capabilities.py` 解析三个入口的实际注册项，新增或删除入口时没更新表就会失败，并检查 README 的工具数、子命令数。`docs/interfaces.md` 新增对照表。
+- **补齐入口**：MCP 新增 `mp_graph_search`、`mp_entity`、`mp_distill`、`mp_check`（共 41 个）；REST 新增 `POST /archive`、`POST /graph-search`、`POST /check`、`POST /supersede`、`GET /contradictions`、`GET /entities/{name}`、`GET /export?wing=`；CLI 新增 `vr update`（共 34 个子命令）。现在 21 项能力三个入口都有。
+
 ## v2.6.0（2026-11-26）数据一致性与安全加固
 
 删除改为级联、写入失败回滚、`vr check` 一致性检查与修复；REST 只认 Bearer 头并校验请求体和参数；持久化向量库记录嵌入指纹，换模型时报警；支持密钥轮换。另外新增检索专用嵌入模型（e5 / bge）的前缀支持和 LLM 矛盾判断。

@@ -28,7 +28,64 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 }
 ```
 
-## MCP 工具列表（共 37 个）
+## 能力对照表
+
+三个入口按同一张表维护（`vecrecall/capabilities.py`），`tests/test_capabilities.py` 检查实际注册的工具、路由、子命令与表一致。「—」表示该入口刻意不提供，原因写在表的源码里。
+
+| 能力 | MCP | REST | CLI |
+|---|---|---|---|
+| add | `mp_add` | `POST /memories` | `add` |
+| add_batch | `mp_add_batch` | `POST /memories/batch` | — |
+| add_file | — | — | `add-file` |
+| update | `mp_update` | `PUT /memories/{id}` | `update` |
+| update_importance | `mp_update_importance` | — | — |
+| delete | `mp_delete` | `DELETE /memories/{id}` | `delete` |
+| prune | `mp_prune` | `POST /prune` | `prune` |
+| archive_session | `mp_archive_session` | `POST /archive` | `archive` |
+| diary_write | `mp_diary_write` | — | `diary` |
+| diary_read | `mp_diary_read` | — | `diary` |
+| import | `mp_import_json` | — | `import` |
+| export | `mp_export_wing` | `GET /export` | `export` |
+| search | `mp_search` | `POST /search` | `search` |
+| context | `mp_build_context` | `POST /context` | `context` |
+| l1 | `mp_l1_moments` | — | — |
+| l2 | `mp_l2_context` | — | — |
+| l3 | `mp_l3_deep` | — | — |
+| fuzzy_recall | `mp_fuzzy_recall` | — | — |
+| format_prompt | `mp_format_prompt` | — | — |
+| graph_search | `mp_graph_search` | `POST /graph-search` | `graph-search` |
+| recall_policy | `mp_recall_policy` | — | `recall-policy` |
+| accept_memory | `mp_accept_memory` | — | — |
+| get | `mp_get_memory` | `GET /memories/{id}` | `get` |
+| list | `mp_list_memories` | `GET /memories` | `list` |
+| wings | `mp_list_wings` | `GET /wings` | `wings` |
+| topics | `mp_list_topics` | `GET /topics` | `topics` |
+| browse_wing | `mp_browse_wing` | — | `browse` |
+| browse_topic | `mp_browse_topic` | — | — |
+| provenance | `mp_provenance` | `GET /memories/{id}/provenance` | `get` |
+| entity | `mp_entity` | `GET /entities/{name}` | `entity` |
+| graph_list | — | — | `graph` |
+| link | `mp_link` | — | — |
+| contradictions | `mp_contradictions` | `GET /contradictions` | `contradictions` |
+| supersede | `mp_supersede` | `POST /supersede` | `supersede` |
+| decay | — | — | `decay` |
+| distill | `mp_distill` | — | `distill` |
+| stats | `mp_stats` | `GET /stats` | `stats` |
+| health | `mp_health` | `GET /health` | — |
+| check | `mp_check` | `POST /check` | `check` |
+| verify | `mp_verify` | `POST /verify` | `verify` |
+| reindex | `mp_reindex` | `POST /reindex` | `reindex` |
+| encryption | — | — | `encryption` |
+| writeback | — | — | `writeback` |
+| repo_map | — | — | `repo-map` |
+| set_identity | `mp_set_identity` | — | — |
+| set_wing | `mp_set_wing` | — | — |
+| set_l2_threshold | `mp_set_l2_threshold` | — | — |
+| init | — | — | `init` |
+| serve_mcp | — | — | `mcp` |
+| serve_api | — | — | `api` |
+
+## MCP 工具列表（共 41 个）
 
 **检索决策**
 - `mp_recall_policy` — 判断当前任务是否值得检索，并给出规范化查询意图
@@ -69,6 +126,12 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 
 **会话存档**
 - `mp_archive_session` — 存档对话：默认每轮一条记忆、共用 session_id；`granularity=session` 时整段一条
+
+**图谱与维护**
+- `mp_graph_search` — 多跳检索：向量命中后沿实体关系扩展，返回关系路径
+- `mp_entity` — 实体画像：当前属性、状态演化、关联关系
+- `mp_distill` — 主动蒸馏（默认 dry_run 只返回计划）
+- `mp_check` — 一致性检查，`repair=true` 修复
 
 **矛盾检测**
 - `mp_contradictions` — 列出被新记忆取代的旧记忆（检索时降权，不删除）
@@ -126,7 +189,7 @@ curl -X POST $BASE/context \
 curl -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/memories/<id>  # 删除
 ```
 
-完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）。认证只接受请求头 `Authorization: Bearer <key>`（v2.6 起拒绝 URL 里的 `?key=`）；请求体上限 8 MB（环境变量 `VR_API_MAX_BODY`），超出返回 413，非法 JSON 返回 400；`n` ≤ 200、`limit` ≤ 1000、批量写入 ≤ 1000 条、单条 `content` ≤ 100 万字符、`importance` ∈ [0, 1]、`min_score` ∈ [-1, 1]，超出返回 400。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
+完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）；v2.6.1 新增 `POST /archive`、`POST /graph-search`、`POST /check`、`POST /supersede`、`GET /contradictions`、`GET /entities/{name}`、`GET /export?wing=`。认证只接受请求头 `Authorization: Bearer <key>`（v2.6 起拒绝 URL 里的 `?key=`）；请求体上限 8 MB（环境变量 `VR_API_MAX_BODY`），超出返回 413，非法 JSON 返回 400；`n` ≤ 200、`limit` ≤ 1000、批量写入 ≤ 1000 条、单条 `content` ≤ 100 万字符、`importance` ∈ [0, 1]、`min_score` ∈ [-1, 1]，超出返回 400。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
 
 `POST /search` 支持 `mode`（`rrf` 默认 / `vector` / `bm25`）、`hybrid`、`min_score`。
 
@@ -159,6 +222,7 @@ vr diary write architect "决定采用 CQRS 模式"
 vr diary read reviewer "安全漏洞"
 
 # 记忆生命周期管理
+vr update <记忆ID> --content "..." [--topic T] [--importance 0.8]   # 更新（支持短 ID）
 vr delete <记忆ID>                 # 删除（支持短 ID 前 8 位）
 vr check [--repair]                 # 检查主库与向量 / 图谱索引是否一致、嵌入模型是否变了，--repair 修复
 vr encryption status                # 加密覆盖范围、明文残留、不加密的文件

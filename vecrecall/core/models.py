@@ -52,6 +52,18 @@ def status_fields(m) -> dict:
     return out
 
 
+def graph_search_to_dict(res: dict) -> dict:
+    """graph_search() 结果序列化（MCP / REST 共用）。"""
+    return {
+        "query": res.get("query"),
+        "direct": [{**memory_to_dict(r.memory), "score": round(r.score, 4)}
+                   for r in res.get("direct", [])],
+        "graph": [{**memory_to_dict(h["memory"]), "entities": h.get("entities", []),
+                   "paths": h.get("paths", [])[:3]}
+                  for h in res.get("graph", [])],
+    }
+
+
 def memory_to_dict(m, full: bool = False) -> dict:
     """将 Memory 序列化为 dict（MCP / REST / 导出统一使用）。"""
     d = {

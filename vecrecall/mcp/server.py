@@ -401,6 +401,50 @@ TOOLS = [
         },
     },
 
+    # ── 图谱 / 维护（v2.6.1 补齐） ──
+    {
+        "name": "mp_graph_search",
+        "description": "多跳检索：向量命中后沿实体关系扩展，返回带关系路径的证据",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "n": {"type": "integer", "default": 10},
+                "hops": {"type": "integer", "default": 2},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "mp_entity",
+        "description": "查询实体画像：当前属性、状态演化时间线、关联关系",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "mp_distill",
+        "description": "主动蒸馏：把同一话题下碎片化的记忆压缩成一条长期记忆。默认 dry_run 只返回计划",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string"},
+                "wing": {"type": "string"},
+                "dry_run": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "mp_check",
+        "description": "检查主库与向量 / 图谱索引是否一致、嵌入模型是否变了；repair=true 时修复",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"repair": {"type": "boolean", "default": False}},
+        },
+    },
+
     # ── 矛盾检测 ──
     {
         "name": "mp_contradictions",
@@ -778,6 +822,26 @@ class MCPServer:
                 "archived_id": mems[0].id if mems else None,
                 "chars": sum(len(m.content) for m in mems),
             }
+
+        elif name == "mp_graph_search":
+            from vecrecall.core.models import graph_search_to_dict
+            n = max(1, min(int(args.get("n", 10)), 200))
+            hops = max(1, min(int(args.get("hops", 2)), 4))
+            return graph_search_to_dict(p.graph_search(args["query"], n=n, hops=hops))
+
+        elif name == "mp_entity":
+            e = p.entity(args["name"])
+            if not e:
+                raise ValueError(f"未找到实体: {args['name']}")
+            return e
+
+        elif name == "mp_distill":
+            plans = p.distill(wing=args.get("wing"), topic=args.get("topic"),
+                              dry_run=args.get("dry_run", True))
+            return {"dry_run": args.get("dry_run", True), "plans": plans}
+
+        elif name == "mp_check":
+            return p.check_consistency(repair=bool(args.get("repair", False)))
 
         elif name == "mp_contradictions":
             rows = p.contradictions(wing=args.get("wing") or None)

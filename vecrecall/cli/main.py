@@ -15,6 +15,7 @@ VecRecall — CLI
   vr export WING [--out FILE]
   vr import FILE
   vr delete ID
+  vr update ID [--content TEXT] [--topic T] [--importance 0.8] [--summary S]
   vr contradictions [--wing W] [--limit N]
   vr check [--repair]
   vr encryption status | vr encryption rotate --new-key KEY
@@ -642,6 +643,29 @@ def _resolve_id(p, short_id: str) -> str | None:
     return rows[0][0] if len(rows) == 1 else None
 
 
+def cmd_update(args, cfg):
+    """更新一条记忆"""
+    p = get_palace(cfg)
+    mid = _resolve_id(p, args.id)
+    if not mid:
+        print(f"✗ 找不到或不唯一: {args.id}", file=sys.stderr)
+        p.close()
+        return
+    content = sys.stdin.read() if args.content == "-" else args.content
+    if content is None and args.topic is None and args.importance is None and args.summary is None:
+        print("✗ 至少指定一项：--content / --topic / --importance / --summary", file=sys.stderr)
+        p.close()
+        return
+    if args.importance is not None and not 0 <= args.importance <= 1:
+        print("✗ --importance 必须在 0 到 1 之间", file=sys.stderr)
+        p.close()
+        return
+    m = p.update(mid, content=content, topic=args.topic,
+                 importance=args.importance, ui_summary=args.summary)
+    print(f"✓ 已更新 {m.id[:8]}…  topic={m.topic}  importance={m.importance:.2f}")
+    p.close()
+
+
 def cmd_check(args, cfg):
     """一致性检查 / 修复"""
     p = get_palace(cfg)
@@ -1105,6 +1129,14 @@ def main():
     p_browse.add_argument("--wing", help="筛选某个 wing")
     p_browse.add_argument("--all", action="store_true", help="显示所有 wing")
 
+    # update
+    p_upd = sub.add_parser("update", help="更新记忆的内容 / 话题 / 重要性 / 摘要（支持短 ID）")
+    p_upd.add_argument("id")
+    p_upd.add_argument("--content", help="新内容（会重新向量化），- 表示从 stdin 读取")
+    p_upd.add_argument("--topic")
+    p_upd.add_argument("--importance", type=float)
+    p_upd.add_argument("--summary", help="新的 AAAK 摘要")
+
     # delete
     p_del = sub.add_parser("delete", help="删除记忆（支持短 ID 前 8 位）")
     p_del.add_argument("id")
@@ -1244,7 +1276,7 @@ def main():
         "browse": cmd_browse, "add-file": cmd_add_file,
         "get": cmd_get, "delete": cmd_delete, "prune": cmd_prune,
         "contradictions": cmd_contradictions, "supersede": cmd_supersede,
-        "check": cmd_check, "encryption": cmd_encryption,
+        "check": cmd_check, "encryption": cmd_encryption, "update": cmd_update,
         "verify": cmd_verify, "reindex": cmd_reindex,
         "api": cmd_api, "list": cmd_list,
         "graph": cmd_graph, "entity": cmd_entity,

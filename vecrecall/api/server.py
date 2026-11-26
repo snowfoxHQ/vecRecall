@@ -258,6 +258,24 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
             return {"wings": p.list_wings()}
         if head == "topics":
             return {"topics": p.list_topics(q.get("wing", [None])[0])}
+        if head == "contradictions":
+            rows = p.contradictions(wing=q.get("wing", [None])[0])
+            limit = _int_param(q.get("limit", [None])[0], "limit", 20, 1, MAX_LIST)
+            return {"total": len(rows), "items": rows[:limit]}
+        if head == "entities" and len(segs) == 2:
+            e = p.entity(segs[1])
+            if not e:
+                raise ValueError(f"未找到实体: {segs[1]}")
+            return e
+        if head == "export":
+            wing = q.get("wing", [None])[0]
+            if not wing:
+                raise _BadRequest("缺少参数 wing")
+            mems = p._kg.top_by_importance(wing, 10**9)
+            if p.owner:
+                mems = [m for m in mems if p._visible_to(m, p.owner)]
+            return {"wing": wing, "count": len(mems),
+                    "memories": [memory_to_dict(m, full=True) for m in mems]}
         if head == "memories":
             if len(segs) == 1:
                 return p.list_memories(
@@ -351,6 +369,39 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
 
         if head == "reindex":
             return {"reindexed": p.reindex()}
+
+        if head == "check":
+            return p.check_consistency(repair=bool(body.get("repair", False)))
+
+        if head == "graph-search":
+            from vecrecall.core.models import graph_search_to_dict
+            if not isinstance(body.get("query"), str) or not body["query"].strip():
+                raise _BadRequest("query 必须是非空字符串")
+            res = p.graph_search(body["query"],
+                                 n=_int_param(body.get("n"), "n", 10, 1, MAX_RESULTS),
+                                 hops=_int_param(body.get("hops"), "hops", 2, 1, 4))
+            return graph_search_to_dict(res)
+
+        if head == "supersede":
+            action = body.get("action", "mark")
+            if action == "mark":
+                p.supersede(body["old_id"], body["new_id"], reason=body.get("reason", "manual"))
+                return {"ok": True, "old_id": body["old_id"], "superseded_by": body["new_id"]}
+            if action == "dismiss":
+                m = p.unsupersede(body["old_id"])
+                return {"ok": True, "old_id": m.id, "dismissed": m.metadata.get("supersede_dismissed")}
+            raise _BadRequest(f"非法 action: {action}（mark / dismiss）")
+
+        if head == "archive":
+            msgs = body.get("messages")
+            if not isinstance(msgs, list) or not msgs or len(msgs) > MAX_LIST:
+                raise _BadRequest(f"messages 必须是非空列表，且不超过 {MAX_LIST} 条")
+            gran = body.get("granularity", "turn")
+            mems = p.archive_session(msgs, session_id=body.get("session_id", ""),
+                                     topic=body.get("topic", "session"),
+                                     wing=body.get("wing"), granularity=gran)
+            return {"granularity": gran, "archived": len(mems), "ids": [m.id for m in mems],
+                    "session_id": mems[0].session_id if mems else None}
 
         if head == "verify":
             return p.verify_integrity(body.get("wing"))
