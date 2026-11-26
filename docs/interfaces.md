@@ -126,7 +126,7 @@ curl -X POST $BASE/context \
 curl -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/memories/<id>  # 删除
 ```
 
-完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
+完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）。认证只接受请求头 `Authorization: Bearer <key>`（v2.6 起拒绝 URL 里的 `?key=`）；请求体上限 8 MB（环境变量 `VR_API_MAX_BODY`），超出返回 413，非法 JSON 返回 400。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
 
 `POST /search` 支持 `mode`（`rrf` 默认 / `vector` / `bm25`）、`hybrid`、`min_score`。
 
@@ -160,6 +160,7 @@ vr diary read reviewer "安全漏洞"
 
 # 记忆生命周期管理
 vr delete <记忆ID>                 # 删除（支持短 ID 前 8 位）
+vr check [--repair]                 # 检查主库与向量 / 图谱索引是否一致，--repair 修复
 vr contradictions                   # 列出被取代的旧记忆
 vr supersede <旧ID> <新ID>          # 手动标记取代；vr supersede <旧ID> --dismiss 撤销误判
 vr prune --min-importance 0.3 --older-than 90  # 清理低价值记忆（预览，加 --yes 确认）

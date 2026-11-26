@@ -52,6 +52,16 @@ def _err(msg: str) -> dict:
     return {"error": msg}
 
 
+# 请求体上限（字节）。可用环境变量 VR_API_MAX_BODY 调整
+MAX_BODY = int(os.environ.get("VR_API_MAX_BODY", str(8 * 1024 * 1024)))
+
+
+class _BadRequest(ValueError):
+    def __init__(self, msg: str, status: int = 400):
+        super().__init__(msg)
+        self.status = status
+
+
 def resolve_api_key(cli_key: str | None, host: str) -> str | None:
     """解析 REST API 访问令牌。
 
@@ -87,15 +97,18 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
         return getattr(self.server, "cors_origin", None)
 
     def _authorized(self) -> bool:
-        """校验 Bearer Token（Authorization 头或 ?key= 查询参数）。"""
+        """校验 Authorization: Bearer <key>。
+
+        v2.6 起不再接受 URL 里的 ?key=：查询参数会进入代理 / 服务器访问日志和浏览器历史。
+        """
         key = self.api_key
         if not key:
             return True  # 未配置 token 时不强制（仅建议本机使用）
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], key):
-            return True
-        qkey = parse_qs(urlparse(self.path).query).get("key", [None])[0]
-        return bool(qkey) and secrets.compare_digest(qkey, key)
+        return auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], key)
+
+    def _key_in_url(self) -> bool:
+        return "key" in parse_qs(urlparse(self.path).query)
 
     def _is_public(self) -> bool:
         """无需认证的路径（健康检查）。"""
@@ -116,25 +129,39 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise _BadRequest("Content-Length 不合法")
         if length <= 0:
             return {}
+        if length > MAX_BODY:
+            raise _BadRequest(f"请求体过大：{length} 字节，上限 {MAX_BODY}", 413)
         raw = self.rfile.read(length)
         if not raw:
             return {}
         try:
-            return json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError:
-            return {}
+            data = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise _BadRequest(f"请求体不是合法的 JSON：{e}")
+        if not isinstance(data, dict):
+            raise _BadRequest("请求体必须是 JSON 对象")
+        return data
 
     def _handle(self, fn):
         """统一认证校验 + 异常处理 + 串行化（保护 SQLite 并发写）。"""
         with self.lock:
             try:
+                if not self._is_public() and self.api_key and self._key_in_url():
+                    self._send(_err("不接受 URL 里的 ?key=（会进入访问日志）；"
+                                    "请用请求头 Authorization: Bearer <key>"), 401)
+                    return
                 if not self._is_public() and not self._authorized():
                     self._send(_err("未授权：缺少或错误的 API Key"), 401)
                     return
                 self._send(fn())
+            except _BadRequest as e:
+                self._send(_err(str(e)), e.status)
             except ValueError as e:
                 self._send(_err(str(e)), 400)
             except KeyError as e:

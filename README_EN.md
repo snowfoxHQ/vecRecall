@@ -202,7 +202,7 @@ The detailed guide is in Chinese: [docs/guide.md](https://github.com/snowfoxHQ/v
 | Python | `from vecrecall import VecRecall` | everything |
 | MCP | `vr-mcp` / `vr mcp` | 37 tools, for Claude Code, Gemini CLI and other MCP clients |
 | REST | `vr-api` / `vr api` | zero-dependency HTTP JSON API, `127.0.0.1:8791` by default |
-| CLI | `vr` | 31 subcommands |
+| CLI | `vr` | 32 subcommands |
 
 Full tool, endpoint and command lists: [docs/interfaces.md](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/interfaces.md).
 

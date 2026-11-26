@@ -16,6 +16,7 @@ VecRecall — CLI
   vr import FILE
   vr delete ID
   vr contradictions [--wing W] [--limit N]
+  vr check [--repair]
   vr supersede OLD_ID NEW_ID | vr supersede OLD_ID --dismiss
   vr prune [--min-importance 0.3] [--older-than 90] [--wing W] [--yes]
   vr verify [--wing W]
@@ -634,6 +635,25 @@ def _resolve_id(p, short_id: str) -> str | None:
     return rows[0][0] if len(rows) == 1 else None
 
 
+def cmd_check(args, cfg):
+    """一致性检查 / 修复"""
+    p = get_palace(cfg)
+    r = p.check_consistency(repair=args.repair)
+    labels = {"orphan_vectors": "孤儿向量（主库已没有）", "missing_vectors": "缺失向量",
+              "orphan_graph": "图谱残留（记忆已删除）", "dangling_refs": "悬空的取代引用"}
+    print(f"记忆数: {r['memories']}")
+    for k, label in labels.items():
+        if k in r:
+            print(f"  {label}: {len(r[k])}")
+    if r["ok"]:
+        print("✓ 一致")
+    elif r.get("repaired"):
+        print("✓ 已修复，可再运行 vr check 确认")
+    else:
+        print("⚠ 发现不一致，运行 vr check --repair 修复")
+    p.close()
+
+
 def cmd_contradictions(args, cfg):
     """列出被取代的旧记忆"""
     p = get_palace(cfg)
@@ -1054,6 +1074,10 @@ def main():
     p_del = sub.add_parser("delete", help="删除记忆（支持短 ID 前 8 位）")
     p_del.add_argument("id")
 
+    # check
+    p_chk = sub.add_parser("check", help="检查主库与向量 / 图谱索引是否一致，--repair 修复")
+    p_chk.add_argument("--repair", action="store_true")
+
     # contradictions / supersede
     p_con = sub.add_parser("contradictions", help="列出被新记忆取代的旧记忆（检索时降权）")
     p_con.add_argument("--wing", help="只看某个 wing")
@@ -1178,6 +1202,7 @@ def main():
         "browse": cmd_browse, "add-file": cmd_add_file,
         "get": cmd_get, "delete": cmd_delete, "prune": cmd_prune,
         "contradictions": cmd_contradictions, "supersede": cmd_supersede,
+        "check": cmd_check,
         "verify": cmd_verify, "reindex": cmd_reindex,
         "api": cmd_api, "list": cmd_list,
         "graph": cmd_graph, "entity": cmd_entity,

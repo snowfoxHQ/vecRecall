@@ -314,16 +314,24 @@ class VecRecall:
             topic_key=topic_key,
         )
 
-        # 1. 向量索引：只索引原文，不含结构信息（这是关键改动）
+        # 1. 先算向量（最可能失败的一步：模型 / 网络），失败时什么都还没写
         vec = self._emb.embed(content)
-        self._vec.upsert(mem.id, vec, {"id": mem.id})
 
-        # 2. 元数据 + 原文持久化到 SQLite
+        # 2. 主库（事实源）+ 向量索引：任一步失败就回滚已写入的部分，不留孤儿
         self._kg.save(mem)
+        try:
+            self._vec.upsert(mem.id, vec, {"id": mem.id})
+        except Exception:
+            self._kg.delete(mem.id)
+            raise
         self._bm25_add(mem.id, content)
 
-        # 3. 时序知识图谱：实体/关系/状态演化
-        self._ingest_graph(ext, mem.id, mem.timestamp)
+        # 3. 时序知识图谱：派生数据，失败不影响记忆本身（可用 check_consistency 补）
+        try:
+            self._ingest_graph(ext, mem.id, mem.timestamp)
+        except Exception as e:  # noqa: BLE001
+            mem.metadata["graph_error"] = f"{type(e).__name__}: {e}"
+            self._kg.save(mem)
 
         # 3b. 矛盾：旧记忆标记被取代（不删除），新记忆记录它取代了谁
         if conflicts:
@@ -993,15 +1001,124 @@ class VecRecall:
         return m
 
     def delete(self, memory_id: str) -> bool:
-        """删除一条记忆（向量索引 + SQLite 同步移除）"""
-        if not self._kg.get(memory_id):
+        """删除一条记忆：主库、向量索引、词法索引、时序图谱一起清理（v2.6 起级联）。
+
+        先删主库（事实源），再清派生索引；派生索引清理失败时记入
+        last_delete_errors，可用 check_consistency(repair=True) 补齐。
+        哈希链区块不删除：链是只追加的审计记录，删掉会破坏完整性校验。
+        其他记忆里指向它的 superseded_by / supersedes / distilled_into 引用一并清掉。
+        """
+        m = self._kg.get(memory_id)
+        if not m:
             return False
-        self._vec.delete(memory_id)
         self._kg.delete(memory_id)
+        errors: dict = {}
+        for name, fn in (("vector", lambda: self._vec.delete(memory_id)),
+                         ("graph", lambda: self._graph.forget_memory(memory_id)),
+                         ("links", lambda: self._unlink_references(m))):
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 —— 主库已删，派生数据可修复
+                errors[name] = f"{type(e).__name__}: {e}"
         if self._bm25 is not None:
             self._bm25.remove(memory_id)
+        self.last_delete_errors = errors
         self.hooks.run_on_delete(memory_id)
         return True
+
+    def check_consistency(self, repair: bool = False) -> dict:
+        """检查主库与派生索引是否一致；repair=True 时修复。
+
+        - orphan_vectors：向量索引里有、主库里没有（如旧版删除中途失败）→ 删除
+        - missing_vectors：主库里有、向量索引里没有 → 重新嵌入写入
+        - orphan_graph：图谱里引用了已不存在的记忆 → 清理
+        - dangling_refs：superseded_by / supersedes 指向已删除的记忆 → 清理
+        哈希链不在检查范围内（用 verify_integrity）。
+        """
+        mem_ids = {mid for mid, _c in self._kg.iter_id_content()}
+        vec_ids = self._vector_ids()
+        report: dict = {"memories": len(mem_ids)}
+        if vec_ids is not None:
+            report["orphan_vectors"] = sorted(vec_ids - mem_ids)
+            report["missing_vectors"] = sorted(mem_ids - vec_ids)
+        gconn = self._graph._conn
+        graph_ids = {r[0] for t in ("entity_mentions", "entity_states", "relations")
+                     for r in gconn.execute(f"SELECT DISTINCT memory_id FROM {t} WHERE memory_id != ''")}
+        report["orphan_graph"] = sorted(graph_ids - mem_ids)
+        dangling = []
+        for m in self._kg.iter_all():
+            md = m.metadata
+            if md.get("superseded_by") and md["superseded_by"] not in mem_ids:
+                dangling.append(m.id)
+            elif any(x not in mem_ids for x in (md.get("supersedes") or [])):
+                dangling.append(m.id)
+        report["dangling_refs"] = dangling
+        report["ok"] = not any(report.get(k) for k in
+                               ("orphan_vectors", "missing_vectors", "orphan_graph", "dangling_refs"))
+        if repair and not report["ok"]:
+            for vid in report.get("orphan_vectors", []):
+                self._vec.delete(vid)
+            for mid in report.get("missing_vectors", []):
+                m = self._kg.get(mid)
+                if m is not None:
+                    self._vec.upsert(mid, self._emb.embed(m.content), {"id": mid})
+            for gid in report["orphan_graph"]:
+                self._graph.forget_memory(gid)
+            for mid in dangling:
+                m = self._kg.get(mid)
+                md = m.metadata
+                if md.get("superseded_by") and md["superseded_by"] not in mem_ids:
+                    for k in ("superseded_by", "superseded_at", "supersede_reason",
+                              "supersede_method", "supersede_confidence"):
+                        md.pop(k, None)
+                md["supersedes"] = [x for x in (md.get("supersedes") or []) if x in mem_ids]
+                self._kg.save(m)
+            self._bm25 = None
+            report["repaired"] = True
+        return report
+
+    def _vector_ids(self) -> set | None:
+        """向量后端里的全部 id；后端不支持枚举时返回 None（跳过这项检查）。"""
+        v = self._vec
+        if isinstance(v, SqliteVectorBackend):
+            return {r[0] for r in v._conn.execute("SELECT id FROM vectors")}
+        idx = getattr(v, "_index", None)
+        if idx is not None and hasattr(idx, "_row"):
+            return set(idx._row)
+        return None
+
+    def _unlink_references(self, m: Memory) -> None:
+        """被删记忆的取代 / 蒸馏关系：让相关记忆不再指向一个不存在的 id。"""
+        md = m.metadata or {}
+        ids = set(md.get("supersedes") or [])
+        if md.get("superseded_by"):
+            ids.add(md["superseded_by"])
+        ids |= set(md.get("sources") or [])
+        if md.get("distilled_into"):
+            ids.add(md["distilled_into"])
+        for oid in ids:
+            o = self._kg.get(oid)
+            if o is None:
+                continue
+            om = o.metadata
+            changed = False
+            if om.get("superseded_by") == m.id:
+                # 取代它的那条被删了：旧记忆恢复正常权重
+                for k in ("superseded_by", "superseded_at", "supersede_reason",
+                          "supersede_method", "supersede_confidence"):
+                    om.pop(k, None)
+                changed = True
+            if m.id in (om.get("supersedes") or []):
+                om["supersedes"] = [x for x in om["supersedes"] if x != m.id]
+                changed = True
+            if om.get("distilled_into") == m.id:
+                om.pop("distilled_into", None)
+                changed = True
+            if m.id in (om.get("sources") or []):
+                om["sources"] = [x for x in om["sources"] if x != m.id]
+                changed = True
+            if changed:
+                self._kg.save(o)
 
     def prune(self, min_importance: float | None = None,
               older_than_days: float | None = None,

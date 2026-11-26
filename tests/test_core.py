@@ -680,7 +680,7 @@ def test_security():
         code, _ = get("/memories", {"Authorization": "Bearer secret"})
         test("Bearer token 返回 200", code == 200)
         code, _ = get("/memories?key=secret")
-        test("?key= 查询参数返回 200", code == 200)
+        test("?key= 查询参数被拒绝（v2.6，避免密钥进日志）", code == 401)
         code, _ = get("/health")
         test("/health 免认证", code == 200)
         code, headers = get("/memories", {"Authorization": "Bearer secret"})

@@ -147,6 +147,8 @@ palace = VecRecall(base_dir="~/.vr",
 
 CLI：`vr init --extractor ollama --llm-model qwen2.5:7b --contradiction-judge llm`。
 
+LLM 只判断进入候选范围的记忆（向量相似度 ≥ 0.2）。默认的词法嵌入下，没有共同词的两条记忆相似度很低（「I live in Seattle」与「I moved to Boston last month」只有 0.12），进不了候选，LLM 也看不到。要覆盖这类情况，请同时使用语义嵌入（默认 MiniLM 或 e5-small）。
+
 也可以单独配置，或传自己的判断函数：
 
 ```python

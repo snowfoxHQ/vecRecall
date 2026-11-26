@@ -36,7 +36,9 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补
 
 **发现 6 已解决（v2.4.0）**：默认后端改为内存索引 + 可选 numpy 矩阵计算，10 万条时 `vector` 检索 4.6 秒 → 11 ms、默认去重写入 4.3 秒 → 16 ms（`benchmarks/results/scale_bow_v24.md`）。仍可改进：100 万条以上需要 ANN 索引；新进程首次检索 10 万条时约 5.6 秒，主要是构建 BM25。 **发现 7 已部分解决**：v2.3 新增 BM25 + RRF，默认检索改为 rrf。
 
-**仍开放**：发现 1（加密覆盖范围）、3（删除非级联）、4（跨存储部分成功）、5（索引 fingerprint）、11/12/13（REST 认证收紧、请求体校验、密钥生命周期）、14（MCP / REST / CLI 能力入口不一致）、15 中的 CI 与 pytest 化、immutable 记忆无限增长需冷存储归档。
+**v2.6 处理**：发现 3（删除改为级联，含图谱与取代 / 蒸馏引用；哈希链按设计保留）、发现 4（写入失败回滚主库，图谱失败降级记录，新增 `check_consistency` / `vr check --repair`；仍不是跨库事务）、发现 11（REST 拒绝 URL `?key=`）、发现 12 部分（请求体上限与 JSON 校验；参数范围校验未做）。
+
+**仍开放**：发现 1（加密覆盖范围）、5（索引 fingerprint）、12 的参数范围校验、13（密钥生命周期）、14（MCP / REST / CLI 能力入口不一致）、15 中的 CI 与 pytest 化、immutable 记忆无限增长需冷存储归档。
 
 回归：test_core 257/257、test_blockchain 72/72、test_governance 58/58、test_recall_policy 19/19、test_repo_map 14/14。
 

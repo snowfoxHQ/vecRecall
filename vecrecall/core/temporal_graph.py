@@ -340,5 +340,44 @@ class TemporalGraph:
         relations = self._conn.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
         return {"entities": entities, "entity_states": states, "relations": relations}
 
+    def forget_memory(self, memory_id: str) -> dict:
+        """删除一条记忆在图谱里的全部痕迹（v2.6 级联删除）。
+
+        - entity_mentions / entity_states / relations 中 memory_id 匹配的行删除
+        - 受影响实体的 mentions 计数与当前属性快照按剩余记录重算
+        - 不再被任何记忆提及、也没有剩余状态和关系的实体整个删除
+        返回各表删除的行数。
+        """
+        if not memory_id:
+            return {"mentions": 0, "states": 0, "relations": 0, "entities": 0}
+        c = self._conn
+        touched = {r[0] for r in c.execute(
+            "SELECT entity_id FROM entity_mentions WHERE memory_id=?", (memory_id,))}
+        touched |= {r[0] for r in c.execute(
+            "SELECT entity_id FROM entity_states WHERE memory_id=?", (memory_id,))}
+        for s, t in c.execute("SELECT source, target FROM relations WHERE memory_id=?", (memory_id,)):
+            touched.update((s, t))
+        n_m = c.execute("DELETE FROM entity_mentions WHERE memory_id=?", (memory_id,)).rowcount
+        n_s = c.execute("DELETE FROM entity_states WHERE memory_id=?", (memory_id,)).rowcount
+        n_r = c.execute("DELETE FROM relations WHERE memory_id=?", (memory_id,)).rowcount
+        n_e = 0
+        for nid in touched:
+            mentions = c.execute("SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?",
+                                 (nid,)).fetchone()[0]
+            states = c.execute("SELECT attribute, value FROM entity_states WHERE entity_id=?"
+                               " ORDER BY timestamp", (nid,)).fetchall()
+            rels = c.execute("SELECT COUNT(*) FROM relations WHERE source=? OR target=?",
+                             (nid, nid)).fetchone()[0]
+            if mentions == 0 and not states and rels == 0:
+                n_e += c.execute("DELETE FROM entities WHERE id=?", (nid,)).rowcount
+                continue
+            attrs: dict = {}
+            for a, v in states:                     # 按时间重放，最后一个值生效
+                attrs[a] = v
+            c.execute("UPDATE entities SET mentions=?, attributes=? WHERE id=?",
+                      (mentions, json.dumps(attrs, ensure_ascii=False), nid))
+        c.commit()
+        return {"mentions": n_m, "states": n_s, "relations": n_r, "entities": n_e}
+
     def close(self):
         self._conn.close()

@@ -47,15 +47,53 @@ _IMPORTANCE_KEYWORDS = [
     "decision", "architecture", "deploy", "migration",
 ]
 
+# v2.6：按「记忆价值」分组的信号词，每组命中一次加分（同组多个词不重复加）
+_IMPORTANCE_GROUPS = {
+    # 决策与变更
+    "decision": ("决定", "决策", "选定", "采用", "改用", "换成", "定了", "不再",
+                 "decided", "decision", "chose", "switched", "will use", "going with"),
+    # 规则、约束、偏好：以后要遵守的
+    "rule": ("必须", "不要", "禁止", "务必", "记住", "规定", "约定", "偏好", "喜欢", "讨厌",
+             "always", "never", "must", "don't", "do not", "remember", "prefer", "favorite"),
+    # 事故与风险
+    "incident": ("bug", "故障", "事故", "报错", "回滚", "宕机", "超时", "漏洞", "critical",
+                 "outage", "incident", "rollback", "error", "failed", "vulnerability"),
+    # 架构与上线
+    "architecture": ("架构", "部署", "上线", "迁移", "主库", "数据库", "接口",
+                     "architecture", "deploy", "migration", "database", "schema", "api"),
+    # 身份与长期事实
+    "identity": ("我叫", "我是", "我住", "生日", "我的名字", "联系方式",
+                 "my name", "i am", "i live", "birthday", "i work"),
+    # 安全
+    "security": ("密码", "密钥", "权限", "认证", "token", "password", "secret", "credential",
+                 "api key", "permission"),
+}
+
+# 寒暄、确认：几乎没有长期价值
+_FILLER = frozenset("""ok okay k thanks thank you thx yes no yep nope sure got it
+好的 好 嗯 嗯嗯 收到 谢谢 多谢 是的 对 行 可以 没问题 好滴 了解 明白 哈哈""".split())
+
 
 def heuristic_importance(content: str) -> float:
-    """启发式重要性评分：长度 + 关键词。"""
-    score = min(len(content) / 2000, 0.5)
-    low = content.lower()
-    for kw in _IMPORTANCE_KEYWORDS:
-        if kw.lower() in low:
-            score += 0.1
-    return min(score, 1.0)
+    """启发式重要性评分（0–1），v2.6 重新标定。
+
+    基础分 0.3；内容长度最多加 0.2；每命中一组价值信号（决策 / 规则与偏好 / 事故 /
+    架构 / 身份 / 安全）加 0.15，最多 1.0。纯寒暄、确认（「好的」「thanks」）为 0.05。
+
+    旧版只看长度和少数关键词，短句几乎都在 0.01 左右，「我们决定用 PostgreSQL 做主库」
+    只有 0.11，L1 排序和 prune(min_importance=...) 都难以使用。
+    """
+    import math
+    text = (content or "").strip()
+    low = text.lower()
+    bare = low.strip(" \t\n。！？!?.,，~～")
+    if not bare or bare in _FILLER:
+        return 0.05
+    score = 0.3 + min(0.2, math.log10(1 + len(text)) / 15)
+    for cues in _IMPORTANCE_GROUPS.values():
+        if any(c in low for c in cues):
+            score += 0.15
+    return round(min(score, 1.0), 3)
 
 
 def heuristic_summary(content: str, max_len: int = 120) -> str:
