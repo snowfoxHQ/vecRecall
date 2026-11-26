@@ -42,7 +42,7 @@ from vecrecall.core.recall_policy import (
 )
 from vecrecall.repomap import build_repo_map, detect_updates, validate_repo_map
 
-__version__ = "2.6.0"
+__version__ = "2.6.1"
 __all__ = [
     "VecRecall", "Memory", "RetrievalResult", "ContextBundle",
     "VectorBackend", "NumpyVectorBackend", "SqliteVectorBackend",

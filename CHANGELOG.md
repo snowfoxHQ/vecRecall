@@ -2,7 +2,9 @@
 
 最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
-## 未发布（v2.6.1）
+## v2.6.1（2026-11-26）入口对齐与 pytest
+
+MCP / REST / CLI 三个入口按同一张能力对照表维护，补齐 12 个入口；测试改用 pytest 运行。不改变已有行为。
 
 ### 改动明细
 

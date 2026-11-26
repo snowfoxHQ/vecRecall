@@ -23,11 +23,11 @@
    git checkout main
    git pull
    git log --oneline -1          # 确认是要发布的提交
-   git tag -a v2.6.0 -m "v2.6.0"
-   git push origin v2.6.0
+   git tag -a v2.6.1 -m "v2.6.1"
+   git push origin v2.6.1
    ```
 
-5. 在 GitHub **Actions** 页面查看 *Publish to PyPI*；如果设置了 Required reviewers，点 **Review deployments → Approve**。
+5. 在 GitHub **Actions** 页面查看 *Publish to PyPI*；如果设置了 Required reviewers，点 **Review deployments**，勾选 `pypi`，**评论框留空**，再点 **Approve and deploy**。评论里贴长段 Markdown 会导致 “There was a problem approving one of the gates”（v2.6.0 遇到过）。
 
 工作流会先检查标签与 `pyproject.toml`、`vecrecall/__init__.py` 中的版本号是否一致，不一致直接失败，不会上传。
 
