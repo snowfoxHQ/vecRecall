@@ -200,7 +200,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 | Python | `from vecrecall import VecRecall` | 全部功能 |
 | MCP | `vr-mcp` / `vr mcp` | 37 个工具，适用于 Claude Code、Gemini CLI 等 MCP 客户端 |
 | REST | `vr-api` / `vr api` | 零依赖 HTTP JSON 接口，默认 `127.0.0.1:8791` |
-| CLI | `vr` | 32 个子命令 |
+| CLI | `vr` | 33 个子命令 |
 
 完整的工具列表、端点和命令见 [docs/interfaces.md](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/interfaces.md)。
 

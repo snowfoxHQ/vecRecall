@@ -234,6 +234,46 @@ class KnowledgeGraph:
                 content = self._cipher.decrypt(content)
             yield mid, content
 
+    # ── 加密维护（v2.6）────────────────────────
+
+    _ENC_COLS = ("content", "ui_summary", "metadata")
+
+    def scan_plaintext(self) -> list[str]:
+        """开启加密时，找出仍以明文存放的记忆 id（加密前写入的旧数据）。"""
+        if self._cipher is None:
+            return []
+        out = []
+        for row in self._conn.execute("SELECT id, content, ui_summary, metadata FROM memories"):
+            mid, *vals = row
+            if any(v and not self._cipher.is_encrypted(v) for v in vals):
+                out.append(mid)
+        return out
+
+    def reencrypt(self, new_cipher) -> int:
+        """用 new_cipher 重写全部加密列（密钥轮换 / 补加密明文旧数据），单个事务完成。
+
+        旧密文用当前 cipher 解开（明文原样读入），再用新 cipher 加密写回。
+        任一行失败则整体回滚，库保持原样。返回处理的行数。
+        """
+        if self._cipher is None:
+            raise ValueError("当前库未开启加密，不能轮换密钥")
+        rows = self._conn.execute(
+            "SELECT id, content, ui_summary, metadata FROM memories").fetchall()
+        updates = []
+        for mid, c, s, m in rows:
+            vals = [new_cipher.encrypt(self._cipher.decrypt(v)) if v else v for v in (c, s, m)]
+            updates.append((*vals, mid))
+        try:
+            self._conn.execute("BEGIN")
+            self._conn.executemany(
+                "UPDATE memories SET content=?, ui_summary=?, metadata=? WHERE id=?", updates)
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._cipher = new_cipher
+        return len(updates)
+
     def count(self, wing: str | None = None) -> int:
         if wing:
             return self._conn.execute(

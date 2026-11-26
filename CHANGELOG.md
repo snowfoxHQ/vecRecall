@@ -10,10 +10,14 @@
 2. **REST 请求体校验**：上限 8 MB（`VR_API_MAX_BODY` 可调），超出返回 413；非法 JSON、非对象 JSON 返回 400（以前静默当作空对象）。
 3. **删除改为级联**：`delete()` 同时清理时序图谱里这条记忆的实体提及、状态和关系，只被它提及的实体整个删除；其他记忆里指向它的取代 / 蒸馏引用一并清掉（取代者被删，旧记忆恢复正常权重）。哈希链区块不删除。
 4. **启发式重要性重新标定**（没传 `importance`、也没有 LLM 抽取器时）：基础 0.3，按决策 / 规则与偏好 / 事故 / 架构 / 身份 / 安全六组信号加分，寒暄为 0.05。以前短句几乎都在 0.01 左右（「我们决定用 PostgreSQL 做主库」0.11 → 0.69）。依赖 `prune(min_importance=...)` 的清理阈值可能需要调整；已有记忆的分数不变。
+5. **REST 参数范围校验**：`n` ≤ 200、`limit` ≤ 1000、批量写入 ≤ 1000 条、单条 `content` ≤ 100 万字符、`importance` ∈ [0, 1]、`min_score` ∈ [-1, 1]；超出返回 400（单条过长返回 413）。
+6. **持久化向量库记录嵌入指纹**（`<base_dir>/index.json`）。打开库时当前嵌入与记录不同、且已有向量，会发出警告并在 `stats()` / `check_consistency()` 里报告 `index_mismatch`；`strict_index=True` 时直接拒绝打开。`reindex()` / `vr reindex` 用当前模型重建后恢复正常。常见原因是 auto 模式下装上或卸载了 sentence-transformers。旧库第一次打开时按当前嵌入写入指纹，不会报警。
 
 ### 改动明细
 
 - **写入回滚**：先算向量再落库；向量写入失败时回滚主库，不留孤儿记忆。图谱写入失败不影响记忆本身，记在 `metadata.graph_error`。
+- **加密维护**：`encryption_status()` 列出加密覆盖范围、明文残留和不加密的文件；`rotate_key()` 单事务轮换密钥并补加密明文旧数据；`salt.key` 原子创建、权限 0600、不覆盖。CLI `vr encryption status|rotate`（共 33 个子命令）。`docs/guide.md` 的静态加密一节改为如实列出不加密的文件。
+- **嵌入指纹**：见升级须知第 6 条；`vr stats` 显示嵌入模型，`vr check` 报告模型不一致，`--repair` 会重建向量。
 - **一致性检查**：新增 `check_consistency(repair=False)` 与 `vr check [--repair]`，检查孤儿向量、缺失向量、图谱残留、悬空的取代引用，并可修复（共 32 个 CLI 子命令）。新增 `tests/test_maintenance.py`。
 - **LLM 矛盾判断**：新增 `LLMJudge`（`core/contradiction.py`），补规则判断的盲区（没有共同词的变更，如「住在西雅图」→「搬去了波士顿」）。`VecRecall(extractor=LLMExtractor(...), contradiction_judge="llm")` 复用认知层的 LLM 配置，也可用 `LLMJudge.from_config()` 单独配置；CLI `vr init --contradiction-judge llm`。规则先判断，判不了再问 LLM；只对相似度 ≥ 0.3 的候选调用，每次写入最多 2 次；置信度 < 0.7 或调用失败按不矛盾处理。
 - **检索专用嵌入模型支持**：嵌入后端新增 `embed_query()`（默认等同 `embed()`，对称模型不受影响）；`SentenceTransformerBackend` 按模型名自动给 e5 / bge 的查询和文档加前缀（`MODEL_PREFIXES`），也可用 `query_prefix` / `doc_prefix` 指定；引擎的 L2 / L3 检索查询改走 `embed_query()`。`longmemeval.py` 的嵌入缓存把查询与文档分开。

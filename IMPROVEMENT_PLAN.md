@@ -36,9 +36,9 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补
 
 **发现 6 已解决（v2.4.0）**：默认后端改为内存索引 + 可选 numpy 矩阵计算，10 万条时 `vector` 检索 4.6 秒 → 11 ms、默认去重写入 4.3 秒 → 16 ms（`benchmarks/results/scale_bow_v24.md`）。仍可改进：100 万条以上需要 ANN 索引；新进程首次检索 10 万条时约 5.6 秒，主要是构建 BM25。 **发现 7 已部分解决**：v2.3 新增 BM25 + RRF，默认检索改为 rrf。
 
-**v2.6 处理**：发现 3（删除改为级联，含图谱与取代 / 蒸馏引用；哈希链按设计保留）、发现 4（写入失败回滚主库，图谱失败降级记录，新增 `check_consistency` / `vr check --repair`；仍不是跨库事务）、发现 11（REST 拒绝 URL `?key=`）、发现 12 部分（请求体上限与 JSON 校验；参数范围校验未做）。
+**v2.6 处理**：发现 3（删除改为级联，含图谱与取代 / 蒸馏引用；哈希链按设计保留）、发现 4（写入失败回滚主库，图谱失败降级记录，新增 `check_consistency` / `vr check --repair`；仍不是跨库事务）、发现 11（REST 拒绝 URL `?key=`）、发现 12（请求体上限、JSON 与参数范围校验）、发现 5（`index.json` 嵌入指纹，换模型时警告 / strict 拒绝，reindex 恢复）、发现 13（`rotate_key` 单事务轮换并补加密明文，`salt.key` 原子创建 0600）、发现 1 部分（文档如实列出不加密的文件，`encryption_status()` 报告；图谱 / 向量 / 链本身仍不加密）。
 
-**仍开放**：发现 1（加密覆盖范围）、5（索引 fingerprint）、12 的参数范围校验、13（密钥生命周期）、14（MCP / REST / CLI 能力入口不一致）、15 中的 CI 与 pytest 化、immutable 记忆无限增长需冷存储归档。
+**仍开放**：发现 1 的图谱与链加密、14（MCP / REST / CLI 能力入口不一致）、15 中的 pytest 化（CI 已在 v2.2 加上）、immutable 记忆无限增长需冷存储归档。
 
 回归：test_core 257/257、test_blockchain 72/72、test_governance 58/58、test_recall_policy 19/19、test_repo_map 14/14。
 

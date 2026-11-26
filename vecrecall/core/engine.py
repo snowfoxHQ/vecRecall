@@ -19,6 +19,7 @@ v2.2 起按职责拆分，本文件只保留 VecRecall 引擎本身：
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from pathlib import Path
@@ -102,6 +103,7 @@ class VecRecall:
         load_plugins: bool = False,
         detect_contradictions: bool = True,
         contradiction_judge=None,
+        strict_index: bool = False,
     ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -159,6 +161,10 @@ class VecRecall:
 
         # 时序知识图谱：写入记忆时自动记录实体/关系/状态演化
         self._graph = TemporalGraph(str(self.base_dir / "graph.db"))
+
+        # 嵌入指纹（v2.6）：记录向量是用哪个模型算的，换模型后不静默混用
+        self.index_mismatch: dict | None = None
+        self._check_index_fingerprint(strict_index)
 
         # 遗忘曲线：记忆强度随时间衰减（艾宾浩斯曲线），供检索加权与遗忘清理
         self._forgetting = ForgettingCurve()
@@ -1053,8 +1059,11 @@ class VecRecall:
             elif any(x not in mem_ids for x in (md.get("supersedes") or [])):
                 dangling.append(m.id)
         report["dangling_refs"] = dangling
+        if self.index_mismatch:
+            report["index_mismatch"] = self.index_mismatch
         report["ok"] = not any(report.get(k) for k in
-                               ("orphan_vectors", "missing_vectors", "orphan_graph", "dangling_refs"))
+                               ("orphan_vectors", "missing_vectors", "orphan_graph", "dangling_refs",
+                                "index_mismatch"))
         if repair and not report["ok"]:
             for vid in report.get("orphan_vectors", []):
                 self._vec.delete(vid)
@@ -1074,6 +1083,8 @@ class VecRecall:
                 md["supersedes"] = [x for x in (md.get("supersedes") or []) if x in mem_ids]
                 self._kg.save(m)
             self._bm25 = None
+            if self.index_mismatch:
+                report["reindexed"] = self.reindex()
             report["repaired"] = True
         return report
 
@@ -1171,7 +1182,132 @@ class VecRecall:
             self._vec.upsert(m.id, self._emb.embed(m.content), {"id": m.id})
             count += 1
         self._bm25 = None   # 词法索引下次检索时从原文重建
+        self._write_fingerprint()
+        self.index_mismatch = None
         return count
+
+    # ── 加密维护 ──────────────────────────────
+
+    def encryption_status(self) -> dict:
+        """静态加密的覆盖范围与明文残留。
+
+        加密的只有 knowledge.db 里记忆的 content / ui_summary / metadata。
+        以下文件不加密，在这里如实列出（是否存在、多大），供使用者自行评估：
+        graph.db（实体名、关系、属性值）、vectors.db / chroma（向量，可能被用于近似反推）、
+        chain.db（开启哈希链时保存原文）、lexical.db（加密库不生成）、trace / reasoning 子目录。
+        """
+        st = {"enabled": self._cipher is not None, "encrypted": ["knowledge.db: content, ui_summary, metadata"]}
+        if self._cipher is None:
+            st["encrypted"] = []
+        st["plaintext_rows"] = len(self._kg.scan_plaintext()) if self._cipher is not None else None
+        exposed = []
+        for name, what in (("graph.db", "实体名、关系、属性值"),
+                           ("vectors.db", "记忆向量"),
+                           ("chroma", "记忆向量（Chroma）"),
+                           ("chain.db", "哈希链区块（含原文）"),
+                           ("lexical.db", "BM25 词频（约等于原文）"),
+                           ("reasoning", "推理链"),
+                           ("traces", "Trace 事件日志")):
+            pth = self.base_dir / name
+            if pth.exists():
+                exposed.append({"file": name, "contains": what})
+        st["not_encrypted"] = exposed
+        return st
+
+    def rotate_key(self, new_secret: str) -> int:
+        """把全部记忆改用新密钥加密（同时把加密前写入的明文旧数据补加密）。
+
+        new_secret：新的 Fernet 密钥或密码（密码模式沿用同一个 salt.key）。
+        单个事务完成，失败时整库回滚。成功后本实例改用新密钥；
+        之后打开这个库必须用新密钥，请先保存好。返回处理的行数。
+        """
+        if self._cipher is None:
+            raise ValueError("当前库未开启加密；先用 encryption_key 打开再轮换")
+        new = Cipher.resolve(new_secret, self.base_dir)
+        n = self._kg.reencrypt(new)
+        self._cipher = new
+        return n
+
+    # ── 嵌入指纹 ──────────────────────────────
+
+    INDEX_FILE = "index.json"
+
+    def embedding_fingerprint(self) -> dict:
+        """当前嵌入后端的指纹：类名、模型名、维度（已知时）、查询 / 文档前缀。"""
+        e = self._emb
+        fp = {"backend": type(e).__name__}
+        model = getattr(e, "model_name", None) or getattr(e, "model", None)
+        if isinstance(model, str) and model:
+            fp["model"] = model
+        dim = getattr(e, "DIM", None)
+        if isinstance(dim, int):
+            fp["dim"] = dim
+        qp, dp = getattr(e, "query_prefix", ""), getattr(e, "doc_prefix", "")
+        if qp or dp:
+            fp["prefix"] = [qp, dp]
+        return fp
+
+    def _persistent_vectors(self) -> bool:
+        return not isinstance(self._vec, NumpyVectorBackend)
+
+    def _write_fingerprint(self) -> None:
+        if not self._persistent_vectors():
+            return
+        import json as _json
+        data = {"embedding": self.embedding_fingerprint(), "updated_at": time.time()}
+        tmp = self.base_dir / (self.INDEX_FILE + ".tmp")
+        tmp.write_text(_json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, self.base_dir / self.INDEX_FILE)
+
+    def _check_index_fingerprint(self, strict: bool) -> None:
+        """打开已有向量库时比对指纹。
+
+        - 内存向量后端：不检查（每次都从空开始）
+        - 没有 index.json：旧库或新库，按当前后端写入
+        - 指纹不同但向量库是空的：直接更新
+        - 指纹不同且已有向量：记入 index_mismatch 并警告；strict_index=True 时拒绝打开。
+          用 reindex() 或 vr reindex 用当前模型重建后恢复正常。
+        常见原因：auto 模式下装上 / 卸载了 sentence-transformers，默认嵌入随之改变。
+        """
+        if not self._persistent_vectors():
+            return
+        import json as _json
+        path = self.base_dir / self.INDEX_FILE
+        cur = self.embedding_fingerprint()
+        stored = None
+        if path.exists():
+            try:
+                stored = _json.loads(path.read_text(encoding="utf-8")).get("embedding")
+            except (ValueError, OSError):
+                stored = None
+        if stored is None:
+            self._write_fingerprint()
+            return
+        if stored == cur:
+            return
+        try:
+            n = self._vec.count() if hasattr(self._vec, "count") else 1
+        except Exception:  # noqa: BLE001
+            n = 1
+        if n == 0:
+            self._write_fingerprint()
+            return
+        self.index_mismatch = {"stored": stored, "current": cur, "vectors": n}
+        msg = (f"向量库是用 {stored} 计算的，当前嵌入后端是 {cur}；两者的向量不能混用，"
+               f"检索结果会不可靠。运行 vr reindex（或 palace.reindex()）用当前模型重建 {n} 条向量。")
+        if strict:
+            # 构造函数里已经打开了 knowledge.db / graph.db / 向量库：先关掉再报错，
+            # 否则调用方拿不到实例去 close()，文件一直被占用（Windows 上删不掉）
+            # 这里还在 __init__ 中途，_chain 等属性尚未创建，不能直接调 close()
+            for obj in (self._kg, self._graph, self._vec):
+                try:
+                    if hasattr(obj, "close"):
+                        obj.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            raise RuntimeError(msg)
+        import warnings
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
 
     # ── 防篡改验证（可选区块链）──────────────
 
@@ -1224,6 +1360,9 @@ class VecRecall:
         if self._chain is not None:
             s["blockchain"] = self._chain.stats()
         s["graph"] = self._graph.stats()
+        s["embedding"] = self.embedding_fingerprint()
+        if self.index_mismatch:
+            s["index_mismatch"] = self.index_mismatch
         return s
 
     # ── 辅助 ──────────────────────────────────

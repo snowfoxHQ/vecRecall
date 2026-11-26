@@ -45,6 +45,22 @@ def _looks_like_fernet_key(s: str) -> bool:
         return False
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """原子创建、仅本人可读写（POSIX 0600；Windows 上沿用目录 ACL）。已存在则不覆盖。
+
+    盐丢失或被覆盖等于密钥丢失：用密码派生的密钥再也解不开旧数据。
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def derive_key(passphrase: str, salt: bytes) -> bytes:
     """从密码 + 盐派生 32 字节 Fernet 密钥（PBKDF2-HMAC-SHA256）。"""
     from cryptography.hazmat.primitives import hashes
@@ -104,8 +120,11 @@ class Cipher:
             salt = salt_path.read_bytes()
         else:
             salt = os.urandom(16)
-            salt_path.write_bytes(salt)
+            _write_private(salt_path, salt)
         return cls.from_passphrase(s, salt)
+
+    def is_encrypted(self, value: str) -> bool:
+        return isinstance(value, str) and value.startswith(_FERNET_PREFIX)
 
     # ── 加解密 ────────────────────────────────
 

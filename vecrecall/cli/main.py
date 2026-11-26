@@ -17,6 +17,7 @@ VecRecall — CLI
   vr delete ID
   vr contradictions [--wing W] [--limit N]
   vr check [--repair]
+  vr encryption status | vr encryption rotate --new-key KEY
   vr supersede OLD_ID NEW_ID | vr supersede OLD_ID --dismiss
   vr prune [--min-importance 0.3] [--older-than 90] [--wing W] [--yes]
   vr verify [--wing W]
@@ -414,6 +415,12 @@ def cmd_stats(args, cfg):
     print(f"  嵌入后端: {stats.get('embedding_backend', type(p._emb).__name__)}")
     if "indexed_vectors" in stats:
         print(f"  索引向量: {stats['indexed_vectors']}")
+    emb = stats.get("embedding") or {}
+    if emb.get("model"):
+        print(f"  嵌入模型: {emb['model']}")
+    if stats.get("index_mismatch"):
+        mm = stats["index_mismatch"]
+        print(f"  ⚠ 向量库用的是 {mm['stored']}，与当前嵌入不一致，请运行 vr reindex")
     if "blockchain" in stats:
         print(f"  哈希链:    {stats['blockchain']}")
     p.close()
@@ -639,6 +646,9 @@ def cmd_check(args, cfg):
     """一致性检查 / 修复"""
     p = get_palace(cfg)
     r = p.check_consistency(repair=args.repair)
+    if r.get("index_mismatch"):
+        mm = r["index_mismatch"]
+        print(f"⚠ 嵌入模型不一致：向量库用的是 {mm['stored']}，当前是 {mm['current']}（--repair 会重建向量）")
     labels = {"orphan_vectors": "孤儿向量（主库已没有）", "missing_vectors": "缺失向量",
               "orphan_graph": "图谱残留（记忆已删除）", "dangling_refs": "悬空的取代引用"}
     print(f"记忆数: {r['memories']}")
@@ -651,6 +661,31 @@ def cmd_check(args, cfg):
         print("✓ 已修复，可再运行 vr check 确认")
     else:
         print("⚠ 发现不一致，运行 vr check --repair 修复")
+    p.close()
+
+
+def cmd_encryption(args, cfg):
+    """静态加密：status / rotate"""
+    p = get_palace(cfg)
+    if args.enc_cmd == "rotate":
+        n = p.rotate_key(args.new_key)
+        cfg["encryption_key"] = args.new_key
+        save_config(cfg)
+        print(f"✓ 已用新密钥重新加密 {n} 条记忆，并写入配置")
+        print("  请妥善保存新密钥：之后打开这个库必须用它")
+        p.close()
+        return
+    st = p.encryption_status()
+    print(f"静态加密: {'开启' if st['enabled'] else '关闭'}")
+    for x in st["encrypted"]:
+        print(f"  已加密: {x}")
+    if st["enabled"]:
+        n = st["plaintext_rows"]
+        print(f"  明文残留: {n} 条" + ("（运行 vr encryption rotate --new-key <当前或新密钥> 补加密）" if n else ""))
+    if st["not_encrypted"]:
+        print("  以下文件不加密：")
+        for x in st["not_encrypted"]:
+            print(f"    {x['file']:<12} {x['contains']}")
     p.close()
 
 
@@ -1074,6 +1109,13 @@ def main():
     p_del = sub.add_parser("delete", help="删除记忆（支持短 ID 前 8 位）")
     p_del.add_argument("id")
 
+    # encryption
+    p_enc = sub.add_parser("encryption", help="静态加密：查看覆盖范围与明文残留 / 轮换密钥")
+    enc_sub = p_enc.add_subparsers(dest="enc_cmd")
+    enc_sub.add_parser("status")
+    p_rot = enc_sub.add_parser("rotate")
+    p_rot.add_argument("--new-key", required=True, help="新的 Fernet 密钥或密码")
+
     # check
     p_chk = sub.add_parser("check", help="检查主库与向量 / 图谱索引是否一致，--repair 修复")
     p_chk.add_argument("--repair", action="store_true")
@@ -1202,7 +1244,7 @@ def main():
         "browse": cmd_browse, "add-file": cmd_add_file,
         "get": cmd_get, "delete": cmd_delete, "prune": cmd_prune,
         "contradictions": cmd_contradictions, "supersede": cmd_supersede,
-        "check": cmd_check,
+        "check": cmd_check, "encryption": cmd_encryption,
         "verify": cmd_verify, "reindex": cmd_reindex,
         "api": cmd_api, "list": cmd_list,
         "graph": cmd_graph, "entity": cmd_entity,

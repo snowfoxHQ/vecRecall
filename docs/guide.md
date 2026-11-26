@@ -307,7 +307,7 @@ agent_a.update_retention_policy(mem.id, "immutable")
 
 ## 静态加密（at-rest encryption）
 
-记忆内容在磁盘上加密存储，防止数据库文件被直接读取时泄露原文。加密范围：`knowledge.db` 的记忆原文、AAAK 摘要、元数据（向量索引是嵌入非明文，图谱是派生结构）。
+记忆内容在磁盘上加密存储，防止数据库文件被直接读取时泄露原文。加密范围只有 `knowledge.db` 里记忆的原文、AAAK 摘要、元数据。
 
 ```python
 from vecrecall import VecRecall, Cipher
@@ -327,7 +327,22 @@ palace.add("数据库密码是 hunter2")    # 落盘时 content/摘要/元数据
 vr init --encrypt                    # 生成密钥并写入配置
 vr init --encrypt-key "你的密码"      # 或指定密钥/密码
 VR_ENCRYPTION_KEY="..." vr add "..."  # 环境变量运行时覆盖（对所有命令生效）
+vr encryption status                 # 覆盖范围、明文残留、不加密的文件
+vr encryption rotate --new-key "..."  # 轮换密钥（同时补加密明文旧数据），并写入配置
 ```
+
+**不加密的文件**（`vr encryption status` 会列出实际存在的）：
+
+| 文件 | 内容 | 说明 |
+|---|---|---|
+| `graph.db` | 实体名、关系、属性值 | 开了认知层或写入 semantic 记忆时才有内容，可能直接暴露人名、项目名 |
+| `vectors.db` / `chroma/` | 记忆向量 | 不是明文，但有研究表明可以部分反推原文 |
+| `chain.db` | 哈希链区块，含原文 | 只在开启哈希链时存在；敏感数据请不要同时开链 |
+| `reasoning/`、`traces/` | 推理链、Trace 事件 | 只在启用对应插件时存在；Trace 默认只记元数据 |
+
+`lexical.db`（BM25 词频，约等于原文）在加密库里不会生成。对这些文件有要求时，请把整个数据目录放在加密卷上（BitLocker、FileVault、LUKS）。
+
+**密钥轮换**：`palace.rotate_key(new_secret)` 用新密钥重写全部记忆，单个事务完成，失败整库回滚；加密前写入的明文旧记录会一起补加密。之后打开这个库必须用新密钥。密码模式下 `salt.key` 原子创建、权限 0600、已存在时不覆盖；**盐丢失等于密钥丢失**，请和密码一起备份。
 
 ---
 

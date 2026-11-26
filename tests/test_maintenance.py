@@ -183,6 +183,16 @@ def test_rest_hardening():
         code, body = call("/memories", data=json.dumps({"content": "正常写入"}).encode(),
                           headers=auth, method="POST")
         test("正常写入", code == 200 and body.get("ok"), str(body))
+        code, body = call("/search", data=json.dumps({"query": "x", "n": 100000}).encode(),
+                          headers=auth, method="POST")
+        test("n 超出上限返回 400", code == 400 and "n" in body.get("error", ""), str(body))
+        code, body = call("/memories?limit=abc", headers=auth)
+        test("limit 非整数返回 400", code == 400, str(body))
+        code, body = call("/memories", data=json.dumps({"content": ""}).encode(), headers=auth, method="POST")
+        test("空 content 返回 400", code == 400, str(body))
+        code, body = call("/memories", data=json.dumps({"content": "x", "importance": 5}).encode(),
+                          headers=auth, method="POST")
+        test("importance 超出 [0,1] 返回 400", code == 400, str(body))
         srv.shutdown()
         srv.server_close()
         p.close()
@@ -206,11 +216,118 @@ def test_importance():
         p.close()
 
 
+def test_fingerprint():
+    print("\n[嵌入指纹]")
+    import warnings
+    from vecrecall.core.embeddings import HashEmbeddingBackend
+    with tempfile.TemporaryDirectory() as d:
+        vp = os.path.join(d, "vectors.db")
+        p = VecRecall(base_dir=d, wing="m", embedding_backend=BagOfWordsEmbeddingBackend(),
+                      vector_backend=SqliteVectorBackend(vp), dedup=False)
+        p.add("第一条记忆")
+        fp = json.load(open(os.path.join(d, "index.json"), encoding="utf-8"))["embedding"]
+        test("写入 index.json", fp.get("backend") == "BagOfWordsEmbeddingBackend" and fp.get("dim") == 512, str(fp))
+        test("stats 带指纹", p.stats()["embedding"] == fp)
+        p.close()
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            p = VecRecall(base_dir=d, wing="m", embedding_backend=BagOfWordsEmbeddingBackend(),
+                          vector_backend=SqliteVectorBackend(vp), dedup=False)
+        test("同一模型重新打开无警告", p.index_mismatch is None and not w)
+        p.close()
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            p = VecRecall(base_dir=d, wing="m", embedding_backend=HashEmbeddingBackend(),
+                          vector_backend=SqliteVectorBackend(vp), dedup=False)
+        test("换模型时给出警告", p.index_mismatch is not None and any("reindex" in str(x.message) for x in w))
+        test("check_consistency 报告模型不一致", "index_mismatch" in p.check_consistency())
+        n = p.reindex()
+        test("reindex 后指纹更新", n == 1 and p.index_mismatch is None
+             and json.load(open(os.path.join(d, "index.json"), encoding="utf-8"))["embedding"]["backend"]
+             == "HashEmbeddingBackend")
+        p.close()
+
+        try:
+            VecRecall(base_dir=d, wing="m", embedding_backend=BagOfWordsEmbeddingBackend(),
+                      vector_backend=SqliteVectorBackend(vp), dedup=False, strict_index=True)
+            test("strict_index 拒绝打开", False)
+        except RuntimeError:
+            test("strict_index 拒绝打开", True)
+
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d)
+        p.add("内存后端")
+        test("内存向量后端不写指纹", not os.path.exists(os.path.join(d, "index.json")))
+        p.close()
+
+
+def test_encryption_maintenance():
+    print("\n[加密维护]")
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        print("  -  未安装 cryptography，跳过")
+        return
+    from vecrecall.core.crypto import Cipher
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d)
+        p.add("加密前写入的明文旧记忆")
+        p.close()
+        k1 = Cipher.generate_key()
+        p = make(d, encryption_key=k1)
+        p.add("加密后写入的记忆")
+        st = p.encryption_status()
+        test("发现 1 条明文残留", st["enabled"] and st["plaintext_rows"] == 1, str(st))
+        test("列出不加密的文件", any(x["file"] == "graph.db" for x in st["not_encrypted"]))
+        k2 = Cipher.generate_key()
+        n = p.rotate_key(k2)
+        test("轮换处理全部记忆", n == 2)
+        test("轮换后无明文残留", p.encryption_status()["plaintext_rows"] == 0)
+        test("轮换后本实例仍可读", len(list(p._kg.iter_all())) == 2)
+        p.close()
+
+        p = make(d, encryption_key=k2)
+        test("新密钥能打开", sorted(m.content for m in p._kg.iter_all())
+             == ["加密前写入的明文旧记忆", "加密后写入的记忆"])
+        p.close()
+        bad = make(d, encryption_key=k1)
+        try:
+            list(bad._kg.iter_all())
+            test("旧密钥打不开", False)
+        except Exception:
+            test("旧密钥打不开", True)
+        finally:
+            bad.close()
+
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d, encryption_key="my passphrase")
+        salt = os.path.join(d, "salt.key")
+        test("密码模式生成 salt.key", os.path.exists(salt))
+        if os.name == "posix":
+            test("salt.key 权限 0600", (os.stat(salt).st_mode & 0o777) == 0o600)
+        before = open(salt, "rb").read()
+        p.close()
+        make(d, encryption_key="my passphrase").close()
+        test("salt.key 不会被覆盖", open(salt, "rb").read() == before)
+        plain = make(d)
+        try:
+            plain.rotate_key(Cipher.generate_key())
+            test("未加密库不能轮换", False)
+        except ValueError:
+            test("未加密库不能轮换", True)
+        finally:
+            plain.close()
+
+
 if __name__ == "__main__":
     test_cascade_delete()
     test_write_rollback()
     test_consistency()
     test_rest_hardening()
     test_importance()
+    test_fingerprint()
+    test_encryption_maintenance()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

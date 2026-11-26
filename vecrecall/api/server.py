@@ -62,6 +62,45 @@ class _BadRequest(ValueError):
         self.status = status
 
 
+# 单次请求能取的条数上限，防止一个请求把整库读出来
+MAX_RESULTS = 200
+MAX_LIST = 1000
+MAX_CONTENT = 1_000_000   # 单条记忆原文上限（字符）
+
+
+def _int_param(v, name: str, default: int, lo: int, hi: int) -> int:
+    if v is None or v == "":
+        return default
+    try:
+        x = int(v)
+    except (TypeError, ValueError):
+        raise _BadRequest(f"参数 {name} 必须是整数，收到 {v!r}")
+    if not lo <= x <= hi:
+        raise _BadRequest(f"参数 {name} 超出范围 [{lo}, {hi}]：{x}")
+    return x
+
+
+def _float_param(v, name: str, lo: float, hi: float):
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise _BadRequest(f"参数 {name} 必须是数字，收到 {v!r}")
+    if not lo <= x <= hi:
+        raise _BadRequest(f"参数 {name} 超出范围 [{lo}, {hi}]：{x}")
+    return x
+
+
+def _content_param(body: dict) -> str:
+    c = body.get("content")
+    if not isinstance(c, str) or not c.strip():
+        raise _BadRequest("content 必须是非空字符串")
+    if len(c) > MAX_CONTENT:
+        raise _BadRequest(f"content 过长：{len(c)} 字符，上限 {MAX_CONTENT}", 413)
+    return c
+
+
 def resolve_api_key(cli_key: str | None, host: str) -> str | None:
     """解析 REST API 访问令牌。
 
@@ -224,8 +263,8 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
                 return p.list_memories(
                     wing=q.get("wing", [None])[0],
                     topic=q.get("topic", [None])[0],
-                    limit=int(q.get("limit", ["50"])[0]),
-                    offset=int(q.get("offset", ["0"])[0]),
+                    limit=_int_param(q.get("limit", [None])[0], "limit", 50, 1, MAX_LIST),
+                    offset=_int_param(q.get("offset", [None])[0], "offset", 0, 0, 10**9),
                     full=q.get("full", ["0"])[0].lower() in ("1", "true", "yes"),
                     sort=q.get("sort", ["importance"])[0],
                 )
@@ -250,13 +289,20 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
 
         if head == "memories":
             if len(segs) == 2 and segs[1] == "batch":
-                ms = p.add_batch(body.get("items", []))
+                items = body.get("items", [])
+                if not isinstance(items, list) or len(items) > MAX_LIST:
+                    raise _BadRequest(f"items 必须是列表，且不超过 {MAX_LIST} 条")
+                for it in items:
+                    if not isinstance(it, dict):
+                        raise _BadRequest("items 的每一项必须是对象")
+                    _content_param(it)
+                ms = p.add_batch(items)
                 return {"added": len(ms), "ids": [m.id for m in ms]}
             m = p.add(
-                content=body["content"],
+                content=_content_param(body),
                 topic=body.get("topic", "general"),
                 wing=body.get("wing"),
-                importance=body.get("importance"),
+                importance=_float_param(body.get("importance"), "importance", 0.0, 1.0),
                 session_id=body.get("session_id", ""),
                 ui_summary=body.get("ui_summary", ""),
                 metadata=body.get("metadata"),
@@ -267,8 +313,8 @@ class VecRecallHTTPHandler(BaseHTTPRequestHandler):
 
         if head == "search":
             results = p.search(
-                body["query"], body.get("n", 10),
-                body.get("min_score"), body.get("hybrid", False),
+                body["query"], _int_param(body.get("n"), "n", 10, 1, MAX_RESULTS),
+                _float_param(body.get("min_score"), "min_score", -1.0, 1.0), body.get("hybrid", False),
                 mode=body.get("mode"),
             )
             return {"results": [
