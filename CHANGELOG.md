@@ -6,6 +6,7 @@
 
 ### 改动明细
 
+- **测试改用 pytest 运行**：新增 `tests/conftest.py`，把各文件里的 `test(name, cond)` 检查接到 pytest 上，一个 `test_*` 函数里有任何一项检查失败，该用例就失败并列出失败项；`python tests/test_x.py` 单独运行的方式保留。`test_dense.py` 原先在导入时直接执行，改成两个 `test_*` 函数。新增安装选项 `vecrecall[dev]`（pytest）；CI 改为 `python -m pytest`，numpy 路径再跑一遍 `test_dense` 与 `test_core`。
 - **三个入口的能力对照表**：新增 `vecrecall/capabilities.py`，登记每项能力在 MCP / REST / CLI 里的名字，缺席的入口写明原因；`tests/test_capabilities.py` 解析三个入口的实际注册项，新增或删除入口时没更新表就会失败，并检查 README 的工具数、子命令数。`docs/interfaces.md` 新增对照表。
 - **补齐入口**：MCP 新增 `mp_graph_search`、`mp_entity`、`mp_distill`、`mp_check`（共 41 个）；REST 新增 `POST /archive`、`POST /graph-search`、`POST /check`、`POST /supersede`、`GET /contradictions`、`GET /entities/{name}`、`GET /export?wing=`；CLI 新增 `vr update`（共 34 个子命令）。现在 21 项能力三个入口都有。
 

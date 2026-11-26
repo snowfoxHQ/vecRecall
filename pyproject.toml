@@ -30,6 +30,7 @@ sentence = ["sentence-transformers>=3.0"]
 crypto = ["cryptography>=42.0"]
 fast = ["numpy>=1.24"]
 full = ["chromadb>=0.5", "sentence-transformers>=3.0", "cryptography>=42.0", "numpy>=1.24"]
+dev = ["pytest>=8"]
 
 [project.urls]
 Homepage = "https://github.com/snowfoxHQ/vecRecall"
@@ -44,3 +45,10 @@ vr-api = "vecrecall.api.server:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vecrecall*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# 只收集 test_ 开头的函数：各文件里的检查函数叫 test，不是用例
+python_functions = ["test_*"]
+addopts = "-ra"

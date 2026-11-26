@@ -210,7 +210,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 
 - 全部本地运行，核心功能不需要任何 API Key；数据默认在 `~/.vecrecall`。
 - **默认不加密**，原文以明文写入 `knowledge.db`。存放敏感内容时请开启静态加密（`vr init --encrypt`），或写入前脱敏（`redact_payloads=True`）。`python scripts/audit_secrets.py` 可以只读扫描已入库的记忆里有没有混入密钥。
-- 静态加密只覆盖 `knowledge.db`，向量索引、知识图谱、哈希链数据库目前不加密。
+- 静态加密只覆盖 `knowledge.db`，向量索引、知识图谱、哈希链数据库目前不加密；`vr encryption status` 列出实际存在的不加密文件。
 - REST：设置 `--api-key` 后必须带 Bearer token；监听非本机地址时强制要求 token；默认不发 CORS 头。
 - MCP 的导入导出路径限制在数据目录内；全部 SQL 参数化。
 
@@ -219,10 +219,10 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 ## 开发
 
 ```bash
-pip install -e ".[crypto]"
-for t in core blockchain governance recall_policy repo_map lexical trace reasoning memory_card; do
-  python tests/test_$t.py
-done
+pip install -e ".[crypto,dev]"
+python -m pytest                         # 全部测试
+python -m pytest tests/test_core.py -k encryption   # 只跑某个文件里名字含 encryption 的用例
+python tests/test_core.py                # 也可以单独运行，逐项打印检查结果
 python benchmarks/benchmark_recall.py    # 内置冒烟评测，几秒钟
 ```
 

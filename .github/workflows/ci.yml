@@ -43,44 +43,17 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[crypto]"
+          python -m pip install -e ".[crypto,dev]"
 
-      - name: test_core
-        run: python tests/test_core.py
-      - name: test_blockchain
-        run: python tests/test_blockchain.py
-      - name: test_governance
-        run: python tests/test_governance.py
-      - name: test_recall_policy
-        run: python tests/test_recall_policy.py
-      - name: test_repo_map
-        run: python tests/test_repo_map.py
-      - name: test_lexical
-        run: python tests/test_lexical.py
-      - name: test_trace
-        run: python tests/test_trace.py
-      - name: test_reasoning
-        run: python tests/test_reasoning.py
-      - name: test_memory_card
-        run: python tests/test_memory_card.py
-      - name: test_capabilities
-        run: python tests/test_capabilities.py
-      - name: test_maintenance
-        run: python tests/test_maintenance.py
-      - name: test_provenance
-        run: python tests/test_provenance.py
-      - name: test_contradiction
-        run: python tests/test_contradiction.py
-      - name: test_dense (pure Python)
-        run: python tests/test_dense.py
+      # 全部测试：纯 Python 路径（不装 numpy / sentence / chroma）
+      - name: pytest
+        run: python -m pytest -q
 
-      # 再装 numpy，把向量化路径也跑一遍（上面的测试都是纯 Python 路径）
+      # 再装 numpy，把向量化路径跑一遍
       - name: Install numpy
         run: python -m pip install numpy
-      - name: test_dense (numpy)
-        run: python tests/test_dense.py
-      - name: test_core (numpy)
-        run: python tests/test_core.py
+      - name: pytest (numpy)
+        run: python -m pytest -q tests/test_dense.py tests/test_core.py
 
       # 冒烟：评测脚本能跑通（不下载 LongMemEval，只用仓库内样例）
       - name: Benchmark smoke

@@ -151,73 +151,80 @@ def check_index(use_numpy):
     test(f"[{label}] 返回的 payload 是副本", "hack" not in idx.query([1.0, 0.0], 1)[0][2])
 
 
-print("\n[DenseIndex]")
-check_index(False)
-if HAS_NUMPY:
-    check_index(True)
-else:
-    print("  - 未安装 numpy，跳过 numpy 路径")
+def test_dense_index():
+    print("\n[DenseIndex]")
+    check_index(False)
+    if HAS_NUMPY:
+        check_index(True)
+    else:
+        print("  - 未安装 numpy，跳过 numpy 路径")
 
-print("\n[后端]")
-rng = random.Random(7)
-nb = NumpyVectorBackend()
-store = random_ops(nb.upsert, nb.delete, rng, 200, 16)
-q = [1, 0, 2] + [0] * 13
-test("NumpyVectorBackend 与旧实现一致", close(nb.query(q, 10, None), reference(store, q, 10, None)))
-test("NumpyVectorBackend.count", nb.count() == len(store))
-nb.clear()
-test("NumpyVectorBackend.clear", nb.count() == 0 and nb.query(q, 5) == [])
 
-with tempfile.TemporaryDirectory() as d:
-    path = os.path.join(d, "vectors.db")
-    sb = SqliteVectorBackend(path)
-    store = random_ops(sb.upsert, sb.delete, rng, 200, 16)
-    test("SqliteVectorBackend 首次查询（载入）一致", close(sb.query(q, 10, None), reference(store, q, 10, None)))
-    for i in range(200, 230):
-        v = [rng.random() for _ in range(16)]
-        sb.upsert(f"m{i}", v, {"id": f"m{i}"})
-        store[f"m{i}"] = (v, {"id": f"m{i}"})
-    sb.delete("m201")
-    store.pop("m201")
-    test("SqliteVectorBackend 增量维护一致", close(sb.query(q, 15, None), reference(store, q, 15, None)))
-    fresh = SqliteVectorBackend(path)
-    test("整表载入与增量维护分数一致",
-         close(sb.query(q, 15, None), fresh.query(q, 15, None)))
-    test("SqliteVectorBackend 增量与重新读库名次一致",
-         [x[0] for x in sb.query(q, 15, None)] == [x[0] for x in fresh.query(q, 15, None)])
-    fresh.close()          # Windows 下未关闭的连接会锁住文件，临时目录删不掉
+def test_backends():
+    print("\n[后端]")
+    rng = random.Random(7)
+    nb = NumpyVectorBackend()
+    store = random_ops(nb.upsert, nb.delete, rng, 200, 16)
+    q = [1, 0, 2] + [0] * 13
+    test("NumpyVectorBackend 与旧实现一致", close(nb.query(q, 10, None), reference(store, q, 10, None)))
+    test("NumpyVectorBackend.count", nb.count() == len(store))
+    nb.clear()
+    test("NumpyVectorBackend.clear", nb.count() == 0 and nb.query(q, 5) == [])
 
-    other = SqliteVectorBackend(path)
-    other.upsert("from_other", q, {"id": "from_other"})
-    other.delete("m5")
-    store.pop("m5", None)
-    test("另一连接写入后能被发现", sb.query(q, 1)[0][0] == "from_other")
-    test("另一连接删除后不再返回", all(x[0] != "m5" for x in sb.query(q, 300, None)))
-    other.close()
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "vectors.db")
+        sb = SqliteVectorBackend(path)
+        store = random_ops(sb.upsert, sb.delete, rng, 200, 16)
+        test("SqliteVectorBackend 首次查询（载入）一致", close(sb.query(q, 10, None), reference(store, q, 10, None)))
+        for i in range(200, 230):
+            v = [rng.random() for _ in range(16)]
+            sb.upsert(f"m{i}", v, {"id": f"m{i}"})
+            store[f"m{i}"] = (v, {"id": f"m{i}"})
+        sb.delete("m201")
+        store.pop("m201")
+        test("SqliteVectorBackend 增量维护一致", close(sb.query(q, 15, None), reference(store, q, 15, None)))
+        fresh = SqliteVectorBackend(path)
+        test("整表载入与增量维护分数一致",
+             close(sb.query(q, 15, None), fresh.query(q, 15, None)))
+        test("SqliteVectorBackend 增量与重新读库名次一致",
+             [x[0] for x in sb.query(q, 15, None)] == [x[0] for x in fresh.query(q, 15, None)])
+        fresh.close()          # Windows 下未关闭的连接会锁住文件，临时目录删不掉
 
-    blob = sb._conn.execute("SELECT dim, vec FROM vectors WHERE id='m210'").fetchone()
-    test("新写入为 float32", len(blob[1]) == blob[0] * 4)
-    sb.close()
+        other = SqliteVectorBackend(path)
+        other.upsert("from_other", q, {"id": "from_other"})
+        other.delete("m5")
+        store.pop("m5", None)
+        test("另一连接写入后能被发现", sb.query(q, 1)[0][0] == "from_other")
+        test("另一连接删除后不再返回", all(x[0] != "m5" for x in sb.query(q, 300, None)))
+        other.close()
 
-    old = os.path.join(d, "old.db")
-    c = sqlite3.connect(old)
-    c.execute("CREATE TABLE vectors (id TEXT PRIMARY KEY, dim INTEGER NOT NULL, "
-              "vec BLOB NOT NULL, payload TEXT DEFAULT '{}')")
-    c.execute("INSERT INTO vectors VALUES (?,?,?,?)", ("a", 3, struct.pack("<3d", 1, 0, 0), '{"id":"a"}'))
-    c.execute("INSERT INTO vectors VALUES (?,?,?,?)", ("b", 3, struct.pack("<3d", 0, 1, 0), '{"id":"b"}'))
-    c.commit()
-    c.close()
-    ob = SqliteVectorBackend(old)
-    r = ob.query([1, 0, 0], 2, None)
-    test("旧库 float64 向量照常读取", r[0][0] == "a" and abs(r[0][1] - 1.0) < 1e-6 and abs(r[1][1]) < 1e-6)
-    ob.upsert("c", [1, 1, 0], {"id": "c"})
-    test("新旧格式混存可查询", [x[0] for x in ob.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
-    ob2 = SqliteVectorBackend(old)          # 重新打开：混存格式走整表载入
-    test("混存格式重新载入后一致", [x[0] for x in ob2.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
-    ob2.close()
-    ob.clear()
-    test("SqliteVectorBackend.clear", ob.count() == 0 and ob.query([1, 0, 0], 3) == [])
-    ob.close()
+        blob = sb._conn.execute("SELECT dim, vec FROM vectors WHERE id='m210'").fetchone()
+        test("新写入为 float32", len(blob[1]) == blob[0] * 4)
+        sb.close()
 
-print(f"\n{PASS} passed, {FAIL} failed")
-sys.exit(1 if FAIL else 0)
+        old = os.path.join(d, "old.db")
+        c = sqlite3.connect(old)
+        c.execute("CREATE TABLE vectors (id TEXT PRIMARY KEY, dim INTEGER NOT NULL, "
+                  "vec BLOB NOT NULL, payload TEXT DEFAULT '{}')")
+        c.execute("INSERT INTO vectors VALUES (?,?,?,?)", ("a", 3, struct.pack("<3d", 1, 0, 0), '{"id":"a"}'))
+        c.execute("INSERT INTO vectors VALUES (?,?,?,?)", ("b", 3, struct.pack("<3d", 0, 1, 0), '{"id":"b"}'))
+        c.commit()
+        c.close()
+        ob = SqliteVectorBackend(old)
+        r = ob.query([1, 0, 0], 2, None)
+        test("旧库 float64 向量照常读取", r[0][0] == "a" and abs(r[0][1] - 1.0) < 1e-6 and abs(r[1][1]) < 1e-6)
+        ob.upsert("c", [1, 1, 0], {"id": "c"})
+        test("新旧格式混存可查询", [x[0] for x in ob.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
+        ob2 = SqliteVectorBackend(old)          # 重新打开：混存格式走整表载入
+        test("混存格式重新载入后一致", [x[0] for x in ob2.query([1, 0, 0], 3, None)][:2] == ["a", "c"])
+        ob2.close()
+        ob.clear()
+        test("SqliteVectorBackend.clear", ob.count() == 0 and ob.query([1, 0, 0], 3) == [])
+        ob.close()
+
+
+if __name__ == "__main__":
+    test_dense_index()
+    test_backends()
+    print(f"\n{PASS} passed, {FAIL} failed")
+    sys.exit(1 if FAIL else 0)

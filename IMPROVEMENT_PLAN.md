@@ -38,9 +38,9 @@ v2.2 把类型化、隔离、不可变与分链能力并入公开核心，并补
 
 **v2.6 处理**：发现 3（删除改为级联，含图谱与取代 / 蒸馏引用；哈希链按设计保留）、发现 4（写入失败回滚主库，图谱失败降级记录，新增 `check_consistency` / `vr check --repair`；仍不是跨库事务）、发现 11（REST 拒绝 URL `?key=`）、发现 12（请求体上限、JSON 与参数范围校验）、发现 5（`index.json` 嵌入指纹，换模型时警告 / strict 拒绝，reindex 恢复）、发现 13（`rotate_key` 单事务轮换并补加密明文，`salt.key` 原子创建 0600）、发现 1 部分（文档如实列出不加密的文件，`encryption_status()` 报告；图谱 / 向量 / 链本身仍不加密）。
 
-**v2.6.1 处理**：发现 14（`vecrecall/capabilities.py` 能力对照表 + `tests/test_capabilities.py` 自动检查，补齐 12 个入口）。
+**v2.6.1 处理**：发现 14（`vecrecall/capabilities.py` 能力对照表 + `tests/test_capabilities.py` 自动检查，补齐 12 个入口）、发现 15 的 pytest 化（`tests/conftest.py` 适配，CI 改用 pytest）。
 
-**仍开放**：发现 1 的图谱与链加密、15 中的 pytest 化（CI 已在 v2.2 加上）、immutable 记忆无限增长需冷存储归档。
+**仍开放**：发现 1 的图谱与链加密、immutable 记忆无限增长需冷存储归档。
 
 回归：test_core 257/257、test_blockchain 72/72、test_governance 58/58、test_recall_policy 19/19、test_repo_map 14/14。
 

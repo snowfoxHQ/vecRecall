@@ -221,10 +221,10 @@ Full tool, endpoint and command lists: [docs/interfaces.md](https://github.com/s
 ## Development
 
 ```bash
-pip install -e ".[crypto]"
-for t in core blockchain governance recall_policy repo_map lexical trace reasoning memory_card; do
-  python tests/test_$t.py
-done
+pip install -e ".[crypto,dev]"
+python -m pytest                         # all tests
+python -m pytest tests/test_core.py -k encryption   # only test functions matching "encryption"
+python tests/test_core.py                # each file still runs standalone, printing every check
 python benchmarks/benchmark_recall.py    # built-in smoke benchmark, a few seconds
 ```
 
