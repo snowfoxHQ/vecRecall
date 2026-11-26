@@ -220,6 +220,87 @@ def test_engine():
         p.close()
 
 
+def test_llm_judge():
+    print("\n[LLM 判断]")
+    from vecrecall.core.contradiction import LLMJudge
+    seen = []
+
+    def fake_chat(prompt):
+        seen.append(prompt)
+        if "Boston" in prompt and "Seattle" in prompt:
+            return '说明：{"contradicts": true, "confidence": 0.9, "reason": "住址变更"}'
+        if "Tokyo" in prompt:
+            return '{"contradicts": true, "confidence": 0.4, "reason": "不太确定"}'
+        if "boom" in prompt:
+            raise TimeoutError("timeout")
+        if "garbage" in prompt:
+            return "not json"
+        return '{"contradicts": false, "confidence": 0.9, "reason": "补充"}'
+
+    j = LLMJudge(fake_chat)
+    v = j("I live in Seattle", "I moved to Boston last month")
+    test("LLM 识别规则盲区", v is not None and v.method == "llm" and "住址" in v.reason, str(v and v.reason))
+    test("输出前后有多余文字也能解析", v is not None and v.confidence == 0.9)
+    test("prompt 里带新旧两条", "Seattle" in seen[0] and "Boston" in seen[0])
+    test("置信度低于阈值不算", j("I live in Osaka", "I moved to Tokyo") is None)
+    test("contradicts=false 不算", j("我们用 PostgreSQL", "PostgreSQL 连接池设为 20") is None)
+    test("网络异常返回 None", j("a", "boom") is None and j.errors == 1)
+    test("非 JSON 返回 None", j("a", "garbage") is None and j.errors == 2)
+
+    class FakeExtractor:
+        def _chat(self, prompt):
+            return fake_chat(prompt)
+
+        def extract(self, content):
+            from vecrecall.core.extractor import HeuristicExtractor
+            return HeuristicExtractor().extract(content)
+
+        def summarize(self, texts):
+            return "；".join(texts)
+
+    test("from_extractor 复用 LLM 配置", LLMJudge.from_extractor(FakeExtractor())("I live in Seattle", "I moved to Boston") is not None)
+    try:
+        LLMJudge.from_extractor(object())
+        test("非 LLM 抽取器报错", False)
+    except TypeError:
+        test("非 LLM 抽取器报错", True)
+
+    # 引擎：contradiction_judge="llm"
+    with tempfile.TemporaryDirectory() as d:
+        try:
+            make(d, contradiction_judge="llm").close()
+            test('contradiction_judge="llm" 缺 extractor 时报错', False)
+        except ValueError:
+            test('contradiction_judge="llm" 缺 extractor 时报错', True)
+    with tempfile.TemporaryDirectory() as d:
+        seen.clear()
+        p = make(d, extractor=FakeExtractor(), contradiction_judge="llm")
+        a = p.add("I live in Seattle near the lake")
+        p.add("I moved to Boston, I live near the harbor now")
+        st = p._kg.get(a.id).metadata
+        test("引擎接入 LLM：没有共同变更信号也能标记", st.get("superseded_by") is not None
+             and st.get("supersede_method") in ("llm", "rule"), str(st))
+        n = len(seen)
+        p.add("Totally unrelated: the cafeteria serves noodles on Friday")
+        test("相似度太低的候选不调用 LLM", len(seen) == n, f"{n} -> {len(seen)}")
+        p.close()
+
+    # 每次写入最多调用 max_judge_calls 次
+    calls = []
+
+    def count_judge(old, new):
+        calls.append(1)
+        return None
+    with tempfile.TemporaryDirectory() as d:
+        p = make(d, contradiction_judge=count_judge)
+        for i in range(6):
+            p.add(f"project phoenix deploy note number {i} uses docker")
+        calls.clear()
+        p.add("project phoenix deploy note uses docker compose")
+        test("每次写入最多调用 2 次外部 judge", len(calls) <= 2, str(len(calls)))
+        p.close()
+
+
 def test_result_fields():
     print("\n[检索结果字段]")
     from vecrecall.core.models import memory_to_dict
@@ -251,6 +332,7 @@ if __name__ == "__main__":
     test_rule()
     test_detector()
     test_engine()
+    test_llm_judge()
     test_result_fields()
     print(f"\n{PASS} passed, {FAIL} failed")
     sys.exit(1 if FAIL else 0)

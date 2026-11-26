@@ -150,6 +150,67 @@ class RuleJudge:
 Judge = Callable[[str, str], Optional[Verdict]]
 
 
+_LLM_PROMPT = """你在维护一个 AI 的长期记忆库。判断「新记忆」是否推翻了「旧记忆」：
+两条说的是同一件事（同一个人 / 项目 / 属性），并且新记忆给出了与旧记忆不同的当前状态，
+旧记忆因此过时。只是补充细节、说的是不同的事、或两者可以同时成立，都不算推翻。
+
+旧记忆：{old}
+新记忆：{new}
+
+只输出 JSON：{"contradicts": true 或 false, "confidence": 0 到 1 的数字, "reason": "不超过 20 字"}"""
+
+
+class LLMJudge:
+    """用 LLM 判断新记忆是否推翻旧记忆，补规则判断的盲区（如「住在西雅图」→「搬去了波士顿」）。
+
+    chat：prompt → 模型输出文本。通常用 from_extractor() 复用 LLMExtractor 的配置。
+    min_confidence：模型给出的置信度低于此值时不算推翻。
+    任何异常（网络、超时、JSON 解析）都返回 None，写入永不因此失败。
+    """
+
+    def __init__(self, chat: Callable[[str], str], min_confidence: float = 0.7):
+        self._chat = chat
+        self.min_confidence = min_confidence
+        self.calls = 0
+        self.errors = 0
+
+    @classmethod
+    def from_extractor(cls, extractor, **kw) -> "LLMJudge":
+        chat = getattr(extractor, "_chat", None)
+        if chat is None:
+            raise TypeError("需要 LLMExtractor（或任何带 _chat(prompt) -> str 的对象）")
+        return cls(chat, **kw)
+
+    @classmethod
+    def from_config(cls, provider: str = "ollama", model: str | None = None,
+                    base_url: str | None = None, api_key: str | None = None,
+                    timeout: float = 30.0, **kw) -> "LLMJudge":
+        from vecrecall.core.extractor import LLMExtractor
+        return cls.from_extractor(LLMExtractor(provider=provider, model=model,
+                                               base_url=base_url, api_key=api_key,
+                                               timeout=timeout), **kw)
+
+    def __call__(self, old_text: str, new_text: str) -> Optional[Verdict]:
+        import json
+        self.calls += 1
+        try:
+            raw = self._chat(_LLM_PROMPT.replace("{old}", old_text[:1500])
+                             .replace("{new}", new_text[:1500]))
+            m = re.search(r"\{.*\}", raw or "", re.S)
+            data = json.loads(m.group(0) if m else raw)
+            if data.get("contradicts") not in (True, "true", "True", 1):
+                return None
+            conf = max(0.0, min(1.0, float(data.get("confidence", 0))))
+            if conf < self.min_confidence:
+                return None
+            return Verdict(confidence=round(conf, 3),
+                           reason="LLM：" + str(data.get("reason", "")).strip()[:60],
+                           method="llm")
+        except Exception:  # noqa: BLE001 —— 判断失败等同于不矛盾
+            self.errors += 1
+            return None
+
+
 class ContradictionDetector:
     """组合规则判断与可选的外部判断（如 LLM）。
 
@@ -159,9 +220,13 @@ class ContradictionDetector:
     """
 
     def __init__(self, judge: Judge | None = None, mode: str | None = None,
-                 rule: RuleJudge | None = None):
+                 rule: RuleJudge | None = None, judge_min_similarity: float = 0.3,
+                 max_judge_calls: int = 2):
         self.rule = rule or RuleJudge()
         self.judge_fn = judge
+        # 外部 judge（如 LLM）开销大：只对相似度足够的前几个候选调用
+        self.judge_min_similarity = judge_min_similarity
+        self.max_judge_calls = max_judge_calls
         self.mode = mode or ("either" if judge else "rule")
         if self.mode not in ("rule", "judge", "either"):
             raise ValueError(f"非法 mode: {self.mode}")
@@ -172,14 +237,25 @@ class ContradictionDetector:
         """是否值得为这条新记忆找候选（规则模式下没有变更信号就跳过）。"""
         return self.mode != "rule" or has_change_cue(new_text)
 
-    def judge(self, old_text: str, new_text: str) -> Optional[Verdict]:
+    def judge(self, old_text: str, new_text: str,
+              similarity: float | None = None, budget: list | None = None) -> Optional[Verdict]:
+        """similarity：候选与新记忆的向量相似度；budget：本次写入剩余的外部 judge 调用次数（[n]，会被扣减）。"""
         if self.mode in ("rule", "either"):
             v = self.rule(old_text, new_text)
             if v is not None or self.mode == "rule":
                 return v
+        if similarity is not None and similarity < self.judge_min_similarity:
+            return None
+        if budget is not None:
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
         v = self.judge_fn(old_text, new_text)
         if v is not None and not isinstance(v, Verdict):
             raise TypeError("judge 必须返回 Verdict 或 None")
         if v is not None and v.method == "rule":
             v.method = "judge"
         return v
+
+    def new_budget(self) -> list:
+        return [self.max_judge_calls]

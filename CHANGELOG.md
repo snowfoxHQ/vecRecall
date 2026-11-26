@@ -6,6 +6,7 @@
 
 ### 改动明细
 
+- **LLM 矛盾判断**：新增 `LLMJudge`（`core/contradiction.py`），补规则判断的盲区（没有共同词的变更，如「住在西雅图」→「搬去了波士顿」）。`VecRecall(extractor=LLMExtractor(...), contradiction_judge="llm")` 复用认知层的 LLM 配置，也可用 `LLMJudge.from_config()` 单独配置；CLI `vr init --contradiction-judge llm`。规则先判断，判不了再问 LLM；只对相似度 ≥ 0.3 的候选调用，每次写入最多 2 次；置信度 < 0.7 或调用失败按不矛盾处理。
 - **检索专用嵌入模型支持**：嵌入后端新增 `embed_query()`（默认等同 `embed()`，对称模型不受影响）；`SentenceTransformerBackend` 按模型名自动给 e5 / bge 的查询和文档加前缀（`MODEL_PREFIXES`），也可用 `query_prefix` / `doc_prefix` 指定；引擎的 L2 / L3 检索查询改走 `embed_query()`。`longmemeval.py` 的嵌入缓存把查询与文档分开。
 - **评测**：LongMemEval-S 470 题（逐轮）上 `intfloat/multilingual-e5-small` 的 rrf R_any@5 98.9%、vector R_any@1 90.9%（默认 MiniLM 分别为 98.3%、85.7%），编码约 35 ms/条（MiniLM 约 14 ms）。默认模型不变，README 召回表新增两行并说明开启方法。结果见 `benchmarks/results/lme_s_e5small_turn.md`；50 题抽样还对比了 `BAAI/bge-small-en-v1.5`（仅英文）。
 

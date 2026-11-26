@@ -134,20 +134,34 @@ palace.supersede(old_id, new_id, reason="人工确认")   # 规则没识别时�
 
 候选是向量相似度在 `CONTRADICTION_MIN_SIM`（0.2）到去重阈值（0.92）之间的前 5 条，限同 wing、对写入者可见、未被取代的记忆。immutable 记忆不参与（既不会被取代，也不会去取代别的记忆）；metadata 带 `_no_contradiction: True` 的单条写入跳过检测。
 
-**局限**：没有共同词的变更识别不了，例如「我住在西雅图」→「我上个月搬去了波士顿」。这类情况可以接 LLM：
+**局限**：没有共同词的变更识别不了，例如「我住在西雅图」→「我上个月搬去了波士顿」。这类情况可以接 LLM（v2.6 起内置）：
 
 ```python
-from vecrecall.core.contradiction import Verdict
+from vecrecall import VecRecall, LLMExtractor
 
-def judge(old_text: str, new_text: str):
-    # 调用 LLM 判断 new 是否推翻 old；是则返回 Verdict，否则返回 None
-    ...
-    return Verdict(confidence=0.9, reason="LLM：住址变更")
-
-palace = VecRecall(base_dir="~/.vr", contradiction_judge=judge)   # 规则或 LLM 任一判定即可
+# 复用认知层的 LLM：规则先判断，判不了再问 LLM
+palace = VecRecall(base_dir="~/.vr",
+                   extractor=LLMExtractor(provider="ollama", model="qwen2.5:7b"),
+                   contradiction_judge="llm")
 ```
 
-提供 judge 后每次写入都会找候选并调用它，写入成本相应增加。关闭检测：`VecRecall(..., detect_contradictions=False)`。
+CLI：`vr init --extractor ollama --llm-model qwen2.5:7b --contradiction-judge llm`。
+
+也可以单独配置，或传自己的判断函数：
+
+```python
+from vecrecall.core.contradiction import LLMJudge, Verdict
+
+judge = LLMJudge.from_config(provider="api", model="gpt-4o-mini", api_key="...",
+                             min_confidence=0.7)
+palace = VecRecall(base_dir="~/.vr", contradiction_judge=judge)
+
+def my_judge(old_text: str, new_text: str):
+    ...   # 返回 Verdict(...) 或 None
+palace = VecRecall(base_dir="~/.vr", contradiction_judge=my_judge)
+```
+
+开销控制：接了 LLM 后每次写入都会找候选，但只对向量相似度 ≥ `judge_min_similarity`（0.3）的候选调用 LLM，每次写入最多 `max_judge_calls`（2）次；规则已经判定的不再调用。LLM 置信度低于 `min_confidence`（0.7）不算推翻；网络失败、超时、输出不是 JSON 时按「不矛盾」处理，写入不受影响。关闭检测：`VecRecall(..., detect_contradictions=False)`。
 
 MCP：`mp_contradictions`、`mp_supersede`；CLI：`vr contradictions`、`vr supersede`。
 

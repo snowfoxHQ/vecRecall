@@ -118,6 +118,12 @@ class VecRecall:
         self.dedup_threshold = dedup_threshold
         # 矛盾检测：新记忆推翻旧记忆时，旧记忆标记 superseded_by 并在检索时降权（不删除）
         self.detect_contradictions = bool(detect_contradictions)
+        if contradiction_judge == "llm":
+            # 复用认知层的 LLM 配置：extractor 必须是 LLMExtractor
+            from vecrecall.core.contradiction import LLMJudge
+            if extractor is None or not hasattr(extractor, "_chat"):
+                raise ValueError('contradiction_judge="llm" 需要同时传入 LLMExtractor（extractor=...）')
+            contradiction_judge = LLMJudge.from_extractor(extractor)
         self._contradiction = ContradictionDetector(judge=contradiction_judge)
         # 写入前脱敏（不可逆，默认关闭；immutable 审计记忆永不脱敏）
         self.redact_payloads = bool(redact_payloads)
@@ -1209,6 +1215,7 @@ class VecRecall:
             return []
         mem_map = self._kg.get_many([r[0] for r in raw])
         out: list[tuple[Memory, Verdict]] = []
+        budget = self._contradiction.new_budget()
         for mid, sim, _p in raw:
             m = mem_map.get(mid)
             if m is None or m.wing != wing or m.retention_policy == "immutable":
@@ -1217,7 +1224,7 @@ class VecRecall:
                 continue
             if viewer and not self._visible_to(m, viewer):
                 continue
-            v = self._contradiction.judge(m.content, content)
+            v = self._contradiction.judge(m.content, content, similarity=float(sim), budget=budget)
             if v is not None:
                 v.detail = dict(v.detail, similarity=round(float(sim), 3))
                 out.append((m, v))

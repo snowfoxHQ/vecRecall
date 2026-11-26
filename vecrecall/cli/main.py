@@ -117,11 +117,20 @@ def get_palace(cfg: dict, args=None) -> VecRecall:
         model=cfg.get("embed_model"),
         base_url=cfg.get("embed_url"),
     )
+    extractor = build_extractor_from(cfg, args)
+    judge = None
+    if cfg.get("contradiction_judge") == "llm":
+        if extractor is None or not hasattr(extractor, "_chat"):
+            print("⚠ contradiction_judge=llm 需要 LLM 抽取器（--extractor ollama|api），已退回规则判断",
+                  file=sys.stderr)
+        else:
+            judge = "llm"
     p = VecRecall(base_dir=cfg["dir"], wing=cfg.get("wing", "default"),
                   use_blockchain=cfg.get("chain", False),
                   embedding_backend=emb,
-                  extractor=build_extractor_from(cfg, args),
-                  encryption_key=_encryption_key(cfg, args))
+                  extractor=extractor,
+                  encryption_key=_encryption_key(cfg, args),
+                  contradiction_judge=judge)
     p.DEFAULT_VIA = "cli"
     return p
 
@@ -195,6 +204,8 @@ def cmd_init(args, cfg):
         cfg["llm_url"] = args.llm_url
     if getattr(args, "llm_api_key", None):
         cfg["llm_api_key"] = args.llm_api_key
+    if getattr(args, "contradiction_judge", None):
+        cfg["contradiction_judge"] = args.contradiction_judge
     if getattr(args, "encrypt", False):
         if not cfg.get("encryption_key"):
             from vecrecall.core.crypto import Cipher
@@ -211,6 +222,7 @@ def cmd_init(args, cfg):
     print(f"  哈希链:    {'启用' if cfg.get('chain') else '关闭'}")
     print(f"  嵌入后端:  {cfg.get('embedder', 'auto')}")
     print(f"  认知层:    {cfg.get('extractor') or '关闭'}")
+    print(f"  矛盾判断:  {cfg.get('contradiction_judge') or 'rule'}")
     print(f"  静态加密:  {'启用' if cfg.get('encryption_key') else '关闭'}")
     print(f"  当前记忆数: {stats['total_memories']}")
     p.close()
@@ -942,6 +954,8 @@ def main():
     p_init.add_argument("--llm-model", help="抽取器 LLM 模型名")
     p_init.add_argument("--llm-url", help="抽取器 LLM 服务地址")
     p_init.add_argument("--llm-api-key", help="抽取器 LLM API Key")
+    p_init.add_argument("--contradiction-judge", choices=["rule", "llm"],
+                        help="矛盾判断：rule（默认，零依赖）/ llm（复用 --extractor 的 LLM，补规则盲区）")
     p_init.add_argument("--encrypt", action="store_true",
                         help="启用静态加密（自动生成密钥，记忆内容加密落盘）")
     p_init.add_argument("--encrypt-key", help="指定加密密钥（44 字符 base64）或密码")
