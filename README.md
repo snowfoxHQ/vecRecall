@@ -126,6 +126,8 @@ L3  深度检索  显式请求      默认 rrf 检索
 |--|--|--|--|--|--|--|
 | `rrf`（默认） | 语义 `sentence` | **91.3%** | **98.3%** | **98.9%** | **0.944** | **96.7%** |
 | `vector` | 语义 `sentence` | 85.7% | 96.4% | 97.0% | 0.904 | 90.0% |
+| `rrf`（默认） | 检索模型 `e5-small` | 91.1% | 98.9% | 99.4% | 0.945 | 100.0% |
+| `vector` | 检索模型 `e5-small` | 90.9% | 98.3% | 99.4% | 0.941 | 90.0% |
 | `bm25` | 不需要 | 87.9% | 96.6% | 98.1% | 0.914 | 80.0% |
 | `rrf`（默认） | 词法 `bow`（零依赖） | 87.0% | 94.7% | 98.3% | 0.907 | 66.7% |
 | `vector` | 词法 `bow` | 77.9% | 92.1% | 94.3% | 0.835 | 46.7% |
@@ -133,6 +135,7 @@ L3  深度检索  显式请求      默认 rrf 检索
 
 - R_any@k：前 k 条结果里至少有一个答案会话。会话级召回，把检索到的记忆换算成所属会话再去重。
 - 语义模型是默认的 `paraphrase-multilingual-MiniLM-L12-v2`。在普通桌面 CPU 上编码约 14 ms/条，就是写入时多出来的时间。
+- `e5-small` 是检索专用模型 `intfloat/multilingual-e5-small`（多语言，查询和文档自动加 `query:` / `passage:` 前缀），编码约 35 ms/条，是默认模型的 2.5 倍。默认的 `rrf` 下它和默认模型基本打平；主要用 `mode="vector"` 时提升明显（R_any@1 85.7% → 90.9%）。开启：`--embedder sentence --embed-model intfloat/multilingual-e5-small`，或 `build_embedding_backend("sentence", model="intfloat/multilingual-e5-small")`；已有数据换模型后要 `vr reindex`。
 - 偏好类只有 30 题，误差约 ±4 个百分点；其余题型见原始报告。
 
 复现：

@@ -126,6 +126,8 @@ The benchmark is the S split of [LongMemEval](https://github.com/xiaowu0162/Long
 |--|--|--|--|--|--|--|
 | `rrf` (default) | semantic `sentence` | **91.3%** | **98.3%** | **98.9%** | **0.944** | **96.7%** |
 | `vector` | semantic `sentence` | 85.7% | 96.4% | 97.0% | 0.904 | 90.0% |
+| `rrf` (default) | retrieval model `e5-small` | 91.1% | 98.9% | 99.4% | 0.945 | 100.0% |
+| `vector` | retrieval model `e5-small` | 90.9% | 98.3% | 99.4% | 0.941 | 90.0% |
 | `bm25` | not needed | 87.9% | 96.6% | 98.1% | 0.914 | 80.0% |
 | `rrf` (default) | lexical `bow` (zero-dependency) | 87.0% | 94.7% | 98.3% | 0.907 | 66.7% |
 | `vector` | lexical `bow` | 77.9% | 92.1% | 94.3% | 0.835 | 46.7% |
@@ -133,6 +135,7 @@ The benchmark is the S split of [LongMemEval](https://github.com/xiaowu0162/Long
 
 - R_any@k: at least one answer session among the top k. Session-level recall: retrieved memories are mapped to their sessions and deduplicated.
 - The semantic model is the default `paraphrase-multilingual-MiniLM-L12-v2`. Encoding takes about 14 ms per memory on an ordinary desktop CPU; that is the extra cost per write.
+- `e5-small` is the retrieval model `intfloat/multilingual-e5-small` (multilingual; `query:` / `passage:` prefixes are added automatically). It takes about 35 ms per memory, 2.5× the default model. With the default `rrf` it is roughly on par with the default model; it helps most if you mainly use `mode="vector"` (R_any@1 85.7% → 90.9%). Enable it with `--embedder sentence --embed-model intfloat/multilingual-e5-small` or `build_embedding_backend("sentence", model="intfloat/multilingual-e5-small")`; run `vr reindex` after switching models on existing data.
 - The preference category has only 30 questions (about ±4 points); other categories are in the raw reports.
 
 Reproduce:

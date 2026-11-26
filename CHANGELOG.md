@@ -2,6 +2,13 @@
 
 最新版本排在最前。各功能的用法见 [docs/guide.md](docs/guide.md)，v2.2 及更早版本的详细升级说明见 [docs/upgrade-notes.md](docs/upgrade-notes.md)。
 
+## 未发布（v2.6）
+
+### 改动明细
+
+- **检索专用嵌入模型支持**：嵌入后端新增 `embed_query()`（默认等同 `embed()`，对称模型不受影响）；`SentenceTransformerBackend` 按模型名自动给 e5 / bge 的查询和文档加前缀（`MODEL_PREFIXES`），也可用 `query_prefix` / `doc_prefix` 指定；引擎的 L2 / L3 检索查询改走 `embed_query()`。`longmemeval.py` 的嵌入缓存把查询与文档分开。
+- **评测**：LongMemEval-S 470 题（逐轮）上 `intfloat/multilingual-e5-small` 的 rrf R_any@5 98.9%、vector R_any@1 90.9%（默认 MiniLM 分别为 98.3%、85.7%），编码约 35 ms/条（MiniLM 约 14 ms）。默认模型不变，README 召回表新增两行并说明开启方法。结果见 `benchmarks/results/lme_s_e5small_turn.md`；50 题抽样还对比了 `BAAI/bge-small-en-v1.5`（仅英文）。
+
 ## v2.5.0（2026-11-25）记忆可信度：矛盾检测与来源追踪
 
 新记忆推翻旧记忆时，旧记忆标记为被取代并在检索时降权，注入 prompt 时标注「已过时」；每条记忆记录写入入口、Agent、会话、轮次和时间。召回与 v2.4 基本一致（LongMemEval-S 会话级 R_any@5 94.7% → 94.9%）。
