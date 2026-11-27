@@ -24,21 +24,32 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
-# IDE
+# IDE / 本地工具
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.codebuddy/
+.cursor/
+.claude/
 
-# Environment variables
+# Environment variables / 密钥
 .env
 .env.local
 .env.*.local
+.env.*
+*.pem
+*.key
 
-# Logs
+# Logs / 调试输出
 *.log
+traces/
+coverage/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store
@@ -46,9 +57,25 @@ Thumbs.db
 
 # 评测数据（LongMemEval 等，需自行下载）
 benchmarks/data/
+benchmarks/*_tmp/
 
-# README 重写前的备份（本地留存，不提交）
+# 本仓库内的 VecRecall 运行产物（仓库知识映射等）
+.vecrecall/
+
+# 本地备份与临时产物
 tmp_readme_backup/
+*.bak
+*.tmp
 
 # 内部分级文档（公开文档规范第四节：实现细节与治理文档不随公开树分发）
 docs/internal/
+
+# 内部开发文档（只放 docs/internal/，禁止出现在公开树）
+IMPROVEMENT_PLAN.md
+RELEASING.md
+PUBLIC_DOC_POLICY.md
+ROADMAP.md
+TODO.md
+NOTES.md
+PRIVACY_INTERNAL*.md
+SECURITY_INTERNAL*.md
