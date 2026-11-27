@@ -1,7 +1,7 @@
 # 接口参考
 
 - [MCP](#mcp)
-- [MCP 工具列表](#mcp-工具列表共-34-个)
+- [MCP 工具列表](#mcp-工具列表共-41-个)
 - [REST](#http-rest-api)
 - [CLI](#cli)
 
@@ -30,7 +30,7 @@ vr-mcp --dir ~/.vr --wing my-project --embedder ollama --embed-model nomic-embed
 
 ## 能力对照表
 
-三个入口按同一张表维护（`vecrecall/capabilities.py`），`tests/test_capabilities.py` 检查实际注册的工具、路由、子命令与表一致。「—」表示该入口刻意不提供，原因写在表的源码里。
+三个入口按同一张能力对照表维护。「—」表示该入口刻意不提供。
 
 | 能力 | MCP | REST | CLI |
 |---|---|---|---|
@@ -161,7 +161,7 @@ vr api --dir ~/.vr --wing my-project --embedder ollama --api-key my-secret-token
 vr-api --dir ~/.vr --port 8791 --api-key my-secret-token
 ```
 
-**认证**：配置了 `--api-key`（或 `VR_API_KEY`）后，除 `/health` 外的所有请求都必须带令牌——请求头 `Authorization: Bearer <token>` 或查询参数 `?key=<token>`；否则返回 401。监听非本机地址（如 `--host 0.0.0.0`）时**强制要求**提供 token。
+**认证**：配置了 `--api-key`（或 `VR_API_KEY`）后，除 `/health` 外的所有请求都必须带请求头 `Authorization: Bearer <token>`，否则返回 401。监听非本机地址（如 `--host 0.0.0.0`）时**强制要求**提供 token。
 
 常用端点：
 
@@ -189,7 +189,7 @@ curl -X POST $BASE/context \
 curl -X DELETE -H "Authorization: Bearer $TOKEN" $BASE/memories/<id>  # 删除
 ```
 
-完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）；v2.6.1 新增 `POST /archive`、`POST /graph-search`、`POST /check`、`POST /supersede`、`GET /contradictions`、`GET /entities/{name}`、`GET /export?wing=`。认证只接受请求头 `Authorization: Bearer <key>`（v2.6 起拒绝 URL 里的 `?key=`）；请求体上限 8 MB（环境变量 `VR_API_MAX_BODY`），超出返回 413，非法 JSON 返回 400；`n` ≤ 200、`limit` ≤ 1000、批量写入 ≤ 1000 条、单条 `content` ≤ 100 万字符、`importance` ∈ [0, 1]、`min_score` ∈ [-1, 1]，超出返回 400。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
+完整端点：`GET /stats` `/wings` `/topics`，`POST /memories/batch` `/prune` `/reindex` `/verify`，`PUT /memories/{id}`、`GET /memories/{id}/provenance`（来源，v2.5）；v2.6.1 新增 `POST /archive`、`POST /graph-search`、`POST /check`、`POST /supersede`、`GET /contradictions`、`GET /entities/{name}`、`GET /export?wing=`。认证只接受请求头 `Authorization: Bearer <key>`；请求体上限 8 MB（环境变量 `VR_API_MAX_BODY`），超出返回 413，非法 JSON 返回 400；`n` ≤ 200、`limit` ≤ 1000、批量写入 ≤ 1000 条、单条 `content` ≤ 100 万字符、`importance` ∈ [0, 1]、`min_score` ∈ [-1, 1]，超出返回 400。`POST /memories` 可带 `provenance` 字段。所有响应均为 JSON。
 
 `POST /search` 支持 `mode`（`rrf` 默认 / `vector` / `bm25`）、`hybrid`、`min_score`。
 
@@ -225,7 +225,7 @@ vr diary read reviewer "安全漏洞"
 vr update <记忆ID> --content "..." [--topic T] [--importance 0.8]   # 更新（支持短 ID）
 vr delete <记忆ID>                 # 删除（支持短 ID 前 8 位）
 vr check [--repair]                 # 检查主库与向量 / 图谱索引是否一致、嵌入模型是否变了，--repair 修复
-vr encryption status                # 加密覆盖范围、明文残留、不加密的文件
+vr encryption status                # 查看加密覆盖范围
 vr encryption rotate --new-key KEY  # 轮换密钥（同时补加密明文旧数据）
 vr contradictions                   # 列出被取代的旧记忆
 vr supersede <旧ID> <新ID>          # 手动标记取代；vr supersede <旧ID> --dismiss 撤销误判

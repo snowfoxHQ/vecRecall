@@ -1,6 +1,6 @@
 # 评测
 
-两套评测，指标定义统一放在 `_metrics.py`。
+两套评测，指标定义在评测脚本间共享。
 
 | 脚本 | 用途 | 数据 | 耗时 |
 |---|---|---|---|
@@ -23,7 +23,7 @@ python benchmarks/benchmark_recall.py --all    # 加上语义嵌入
 
 ### 1. 下载数据
 
-从 [Hugging Face](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) 下载，放到 `benchmarks/data/`（该目录已在 .gitignore 中忽略，数据不进仓库）：
+从 [Hugging Face](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) 下载，放到 `benchmarks/data/`（该目录不入仓库）：
 
 ```bash
 mkdir -p benchmarks/data && cd benchmarks/data
@@ -64,7 +64,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 |---|---|
 | `vector` | 纯向量检索（默认路径，去重关闭） |
 | `hybrid` | 相似度 + 重要性 + 时间新鲜度重排 |
-| `dedup` | 开启写入时语义去重（阈值 0.92） |
+| `dedup` | 开启写入时语义去重（默认阈值） |
 | `graph` | 启发式抽取实体入图，用多跳检索（直接命中 + 图谱扩展）排序 |
 
 其他参数：`--granularity turn` 每轮对话一条记忆（同时报告轮次级召回），`--user-only` 只写入用户轮次，`--types` 只评某些题型，`--dump` 输出逐题结果。

@@ -42,15 +42,15 @@ palace.session_memories("chat-0525")                                 # 按顺序
 
 | mode | 做法 | `score` 的含义 |
 |---|---|---|
-| `rrf`（默认） | 向量与 BM25 各取 n×3 条候选，按名次融合（k=60） | 融合分数，约 0.01–0.04 |
+| `rrf`（默认） | 向量与词法（BM25）候选按名次融合 | 融合分数，约 0.01–0.04 的量级 |
 | `vector` | 纯向量检索 | 余弦相似度 |
 | `bm25` | 纯 BM25 词法检索 | BM25 分数 |
 
 - 依赖分数阈值的调用方请用 `mode="vector"`；`min_score` 只作用于向量那一路。
-- 全局切回旧行为：`palace.DEFAULT_SEARCH_MODE = "vector"`。
-- BM25 索引在第一次词法检索时从 SQLite 原文构建，之后随写入增量维护；`reindex()` 后重建。多个进程同时写同一个数据目录时，其他进程新写入的记忆要等本进程重建索引后才搜得到。
-- `hybrid=True` 在结果上再按「0.6 相似度 + 0.25 重要性 + 0.15 时间新鲜度」重排；`as_of` 指定计算新鲜度的参考时刻。LongMemEval 上 hybrid 没有带来提升，默认关闭。
-- L2 语义触发（0.55）和写入去重（0.92）始终按余弦相似度判断，不受 `mode` 影响。
+- 也可以设置 `palace.DEFAULT_SEARCH_MODE = "vector"` 全局切换默认模式。
+- 词法索引在第一次词法检索时从原文构建，之后随写入增量维护；`reindex()` 后重建。多个进程同时写同一个数据目录时，其他进程新写入的记忆要等本进程重建索引后才搜得到。
+- `hybrid=True` 在结果上再按「相似度 + 重要性 + 时间新鲜度」加权重排（权重可配置）；`as_of` 指定计算新鲜度的参考时刻。hybrid 默认关闭。
+- 语义触发与写入去重始终按余弦相似度判断，不受 `mode` 影响。
 
 ---
 
@@ -103,7 +103,7 @@ palace.provenance(m.id)
 #  "occurrences": 1, "merged_from": [], "superseded_by": None, "supersedes": []}
 ```
 
-- **重复写入**：去重合并时，首次来源保留在 `origin`，之后每次重复写入的来源记在 `merged_from`（最多 `PROVENANCE_MAX_MERGES` = 20 条，超出部分计入 `merged_dropped`）。
+- **重复写入**：去重合并时，首次来源保留在 `origin`，之后每次重复写入的来源记在 `merged_from`（保留条数有上限，超出部分计入 `merged_dropped`）。
 - **取代与蒸馏**：`provenance()` 同时返回 `superseded_by` / `supersedes`；蒸馏出的记忆 `via=distill`，`derived_from` 列出源记忆，源记忆有 `distilled_into`。
 - **旧数据**：v2.4 及更早写入的记忆没有 provenance，`provenance()` 会从 `session_id`、`owner`、写入时间推断，并标记 `legacy: True`。
 - **可见性**：看不到的 private 记忆，`provenance()` 同样报「不存在」。
@@ -112,7 +112,7 @@ MCP：`mp_add` 支持 `provenance` 参数，`mp_provenance` 查看来源；REST�
 
 ## 矛盾检测
 
-v2.4 起默认开启。新记忆推翻某条旧记忆时，旧记忆在 metadata 里记下 `superseded_by`（以及原因、置信度、时间），新记忆记下 `supersedes`，检索时旧记忆的分数乘以 `SUPERSEDED_WEIGHT`（默认 0.5）再重排。**不删除任何记忆。**
+v2.4 起默认开启。新记忆推翻某条旧记忆时，旧记忆在 metadata 里记下 `superseded_by`（以及原因、置信度、时间），新记忆记下 `supersedes`，检索时旧记忆降权后重排（降权幅度可配置）。**不删除任何记忆。**
 
 ```python
 old = palace.add("我们决定用 PostgreSQL 做主库")
@@ -128,13 +128,13 @@ palace.supersede(old_id, new_id, reason="人工确认")   # 规则没识别时�
 
 **规则判断**（默认，零依赖）要同时满足三个条件，原则是宁可漏判、不误判：
 
-1. 新记忆带变更信号：「改用 / 换成 / 改到 / 不再 / switched / changed to / no longer」等；「现在 / now」这类弱信号要求更高的主题重合度。没有信号的写入直接跳过，不做额外检索。
-2. 两条记忆说的是同一件事：去掉变更词后的内容词重合度足够高。
+1. 新记忆带明确的变更意图（如表达「改用 / 不再」一类含义）。
+2. 两条记忆说的是同一件事：内容重合度足够高。
 3. 旧值被换掉了：只是在旧记忆上补充信息（「PostgreSQL 主库的连接池设为 20」）不算。
 
-候选是向量相似度在 `CONTRADICTION_MIN_SIM`（0.2）到去重阈值（0.92）之间的前 5 条，限同 wing、对写入者可见、未被取代的记忆。immutable 记忆不参与（既不会被取代，也不会去取代别的记忆）；metadata 带 `_no_contradiction: True` 的单条写入跳过检测。
+只有与新记忆最相关、同 wing、对写入者可见且未被取代的少数记忆会进入候选；immutable 记忆不参与（既不会被取代，也不会去取代别的记忆）。
 
-**局限**：没有共同词的变更识别不了，例如「我住在西雅图」→「我上个月搬去了波士顿」。这类情况可以接 LLM（v2.6 起内置）：
+**换一种说法的变更**（例如「我住在西雅图」→「我上个月搬去了波士顿」）建议接 LLM 判断（v2.6 起内置），并搭配语义嵌入模型使用，覆盖更全面：
 
 ```python
 from vecrecall import VecRecall, LLMExtractor
@@ -147,29 +147,28 @@ palace = VecRecall(base_dir="~/.vr",
 
 CLI：`vr init --extractor ollama --llm-model qwen2.5:7b --contradiction-judge llm`。
 
-LLM 只判断进入候选范围的记忆（向量相似度 ≥ 0.2）。默认的词法嵌入下，没有共同词的两条记忆相似度很低（「I live in Seattle」与「I moved to Boston last month」只有 0.12），进不了候选，LLM 也看不到。要覆盖这类情况，请同时使用语义嵌入（默认 MiniLM 或 e5-small）。
+LLM 只判断进入候选范围的记忆。需要跨措辞判断的场景，请搭配语义嵌入模型使用（默认模型或 e5-small）。
 
 也可以单独配置，或传自己的判断函数：
 
 ```python
-from vecrecall.core.contradiction import LLMJudge, Verdict
+from vecrecall.core.contradiction import LLMJudge
 
-judge = LLMJudge.from_config(provider="api", model="gpt-4o-mini", api_key="...",
-                             min_confidence=0.7)
+judge = LLMJudge.from_config(provider="api", model="gpt-4o-mini", api_key="...")
 palace = VecRecall(base_dir="~/.vr", contradiction_judge=judge)
 
 def my_judge(old_text: str, new_text: str):
-    ...   # 返回 Verdict(...) 或 None
+    ...   # 返回判断结果或 None
 palace = VecRecall(base_dir="~/.vr", contradiction_judge=my_judge)
 ```
 
-开销控制：接了 LLM 后每次写入都会找候选，但只对向量相似度 ≥ `judge_min_similarity`（0.3）的候选调用 LLM，每次写入最多 `max_judge_calls`（2）次；规则已经判定的不再调用。LLM 置信度低于 `min_confidence`（0.7）不算推翻；网络失败、超时、输出不是 JSON 时按「不矛盾」处理，写入不受影响。关闭检测：`VecRecall(..., detect_contradictions=False)`。
+开销控制：只有进入候选范围、且规则判不了的记忆才会调用 LLM，每次写入的调用次数有上限；调用频率与门槛均可配置。LLM 不可用或结果不确定时不做判断，写入不受影响。不需要矛盾检测时可在配置中关闭（`detect_contradictions=False`）。
 
 MCP：`mp_contradictions`、`mp_supersede`；CLI：`vr contradictions`、`vr supersede`。
 
 ## 语义去重合并
 
-默认开启：写入前先做向量检索，若与既有记忆相似度 ≥ `dedup_threshold`（默认 0.92），则合并（`occurrences + 1`、重要性取较大值），而不是新增一条。
+默认开启：写入前先做向量检索，若与既有记忆相似度达到去重阈值（`dedup_threshold`，默认极高、只合并近乎原样的重复），则合并（`occurrences + 1`、重要性取较大值），而不是新增一条。
 
 ```python
 m1 = palace.add(content="决定采用微服务架构")
@@ -186,14 +185,13 @@ Python 侧也可直接构造：
 from vecrecall import VecRecall, LLMExtractor
 
 with VecRecall(base_dir="~/.vr", wing="my-project",
-               extractor=LLMExtractor(provider="ollama", model="llama3.2"),
-               dedup_threshold=0.92) as palace:
+               extractor=LLMExtractor(provider="ollama", model="llama3.2")) as palace:
     palace.add("Alice 加入了微服务团队")
 ```
 
 ## 时序知识图谱
 
-认知层抽取出的实体、关系、状态自动汇入一张**带时间戳的知识图谱**（`graph.db`），记录实体的出现、实体间的关联，以及实体属性随时间的演化。
+认知层抽取出的实体、关系、状态自动汇入一张**带时间戳的知识图谱**（数据目录内的独立数据库），记录实体的出现、实体间的关联，以及实体属性随时间的演化。
 
 ```python
 palace.add("Alice 加入了微服务团队")   # 状态：Alice.team = 微服务团队
@@ -307,7 +305,7 @@ agent_a.update_retention_policy(mem.id, "immutable")
 
 ## 静态加密（at-rest encryption）
 
-记忆内容在磁盘上加密存储，防止数据库文件被直接读取时泄露原文。加密范围只有 `knowledge.db` 里记忆的原文、AAAK 摘要、元数据。
+记忆内容在磁盘上加密存储，防止数据库文件被直接读取时泄露原文。加密覆盖记忆的原文、摘要与元数据；实际覆盖范围可用 `vr encryption status` 查看。
 
 ```python
 from vecrecall import VecRecall, Cipher
@@ -317,7 +315,7 @@ palace = VecRecall(base_dir="~/.vr", encryption_key=key)
 palace.add("数据库密码是 hunter2")    # 落盘时 content/摘要/元数据已加密
 ```
 
-- 密钥来源：直接给 Fernet 密钥（44 字符 urlsafe base64），或给密码（PBKDF2 派生，盐持久化在 `salt.key`）。
+- 密钥来源：直接给自动生成的随机密钥，或给密码（自动派生为密钥）。
 - 错误密钥读取会抛 `InvalidToken`（绝不静默返回密文）；已存在的明文旧数据自动兼容。
 - 依赖 `cryptography`（`pip install vecrecall[crypto]`），未安装时启用加密会给出明确提示，绝不静默降级为明文。
 
@@ -327,22 +325,13 @@ palace.add("数据库密码是 hunter2")    # 落盘时 content/摘要/元数据
 vr init --encrypt                    # 生成密钥并写入配置
 vr init --encrypt-key "你的密码"      # 或指定密钥/密码
 VR_ENCRYPTION_KEY="..." vr add "..."  # 环境变量运行时覆盖（对所有命令生效）
-vr encryption status                 # 覆盖范围、明文残留、不加密的文件
-vr encryption rotate --new-key "..."  # 轮换密钥（同时补加密明文旧数据），并写入配置
+vr encryption status                 # 查看加密覆盖范围
+vr encryption rotate --new-key "..."  # 轮换密钥（旧明文数据一并补加密），并写入配置
 ```
 
-**不加密的文件**（`vr encryption status` 会列出实际存在的）：
+**加密覆盖边界**：静态加密覆盖记忆主库；数据目录中的其他辅助文件（知识图谱、向量索引、存档区块、插件日志等，视功能开启情况而定）不在加密覆盖范围内，实际存在哪些可用 `vr encryption status` 查看。对整个数据目录有保密要求时，请把它放在加密卷上（BitLocker、FileVault、LUKS）。
 
-| 文件 | 内容 | 说明 |
-|---|---|---|
-| `graph.db` | 实体名、关系、属性值 | 开了认知层或写入 semantic 记忆时才有内容，可能直接暴露人名、项目名 |
-| `vectors.db` / `chroma/` | 记忆向量 | 不是明文，但有研究表明可以部分反推原文 |
-| `chain.db` | 哈希链区块，含原文 | 只在开启哈希链时存在；敏感数据请不要同时开链 |
-| `reasoning/`、`traces/` | 推理链、Trace 事件 | 只在启用对应插件时存在；Trace 默认只记元数据 |
-
-`lexical.db`（BM25 词频，约等于原文）在加密库里不会生成。对这些文件有要求时，请把整个数据目录放在加密卷上（BitLocker、FileVault、LUKS）。
-
-**密钥轮换**：`palace.rotate_key(new_secret)` 用新密钥重写全部记忆，单个事务完成，失败整库回滚；加密前写入的明文旧记录会一起补加密。之后打开这个库必须用新密钥。密码模式下 `salt.key` 原子创建、权限 0600、已存在时不覆盖；**盐丢失等于密钥丢失**，请和密码一起备份。
+**密钥轮换**：`palace.rotate_key(new_secret)` 用新密钥重写全部记忆，一次操作完成；加密前写入的明文旧数据会一并补加密。之后打开这个库必须用新密钥。密码模式下，派生盐与密码应一起备份，**盐丢失等于密钥丢失**。
 
 ---
 
@@ -350,8 +339,8 @@ vr encryption rotate --new-key "..."  # 轮换密钥（同时补加密明文旧�
 
 四组可独立启用的治理机制，默认不改变既有行为：
 
-- **写入前脱敏**：`redact_memory_payload()` 用带优先级的规则表识别私钥、令牌、Cookie、API Key、邮箱等 8 类敏感信息，白名单避免误伤 `${VAR}` / `example`。`VecRecall(redact_payloads=True)` 在落库前脱敏，并把统计写入 `metadata.redaction_counts`。脱敏不可逆，默认关闭；与静态加密互补（加密不阻止原文写入）。
-- **写回治理**：`WritebackGovernor` 提供幂等键、按 turn / 字符 / 消息数 / idle 四维触发的缓冲和失败重试；`SqliteOutbox` 把待写回任务持久化到 `knowledge.db` 的 `writeback_outbox` 表，可用 `vr writeback stats|recover` 查看与恢复。
+- **写入前脱敏**：开启后（`VecRecall(redact_payloads=True)`），写入内容中的常见敏感信息（私钥、令牌、Cookie、API Key、邮箱等）会被自动识别并遮蔽，可通过白名单避免误伤正常内容；脱敏统计记在该记忆的元数据里。脱敏不可逆，默认关闭；与静态加密互补（加密不阻止原文写入）。
+- **写回治理**：面向高写入频率场景提供幂等键、按轮次 / 字符数 / 消息数 / 空闲时间触发的缓冲和失败重试；待写回任务持久化落盘，可用 `vr writeback stats|recover` 查看与恢复。
 - **检索决策**：`decide_recall(query, context)` 判断当前任务是否值得检索，`build_query_intent()` 规范化查询，`evaluate_memory()` 做三项验收（同边界 / 同行为 / 可执行）。MCP 暴露 `mp_recall_policy`、`mp_accept_memory`；`mp_search` 的 `acceptance_query` 会附加验收结果但**不改变召回和排序**。
 - **仓库知识映射**：`vr repo-map build|update|validate` 把仓库结构、入口、模块职责与 git 证据写入仓库内 `.vecrecall/repo/`，按 baseline SHA 增量更新并校验产物。该产物**不进入向量索引**，只作为显式上下文，保持"检索与组织解耦"。
 
@@ -381,7 +370,7 @@ vr repo-map validate --repo .
 
 ## 推理链与反思
 
-`vecrecall.reasoning`（可选模块，移植自 HMR ThoughtChain）记录「为什么这样决定」：一次推理任务是一条链，链上依次挂观察、假设、决策、行动；事后用实际结果反思，标出哪些决策对、哪些错，并把有学习价值的结论写进主库。
+`vecrecall.reasoning`（可选模块）记录「为什么这样决定」：一次推理任务是一条链，链上依次挂观察、假设、决策、行动；事后用实际结果反思，标出哪些决策对、哪些错，并把有学习价值的结论写进主库。
 
 ```python
 from vecrecall.reasoning import ReasoningEngine, ThoughtType
@@ -397,16 +386,16 @@ eng.best_decision_for("IPC 队列积压超时")
 # {'decision': '扩容消费者线程 x3', 'accuracy': 1.0, ...}
 ```
 
-- 链保存在独立的推理库 `<base_dir>/reasoning/`，推理过程不会出现在主库的检索结果里。
-- 评分 ≥ 0.7 时决策判为正确；≤ 0.3 时决策和假设判为错误。评分 > 0.85 或 < 0.25 时，结论作为 semantic 记忆写进主库（`topic="reasoning_insight"`）；写入失败时留在链上，`retry_pending_insights()` 可以补写。
-- `find_similar()` 用 rrf 检索取候选，再要求目标的词重叠 ≥ 0.3；`best_decision_for()` 只采信准确率 ≥ 0.7 的链。
+- 链保存在数据目录内的独立推理库中，推理过程不会出现在主库的检索结果里。
+- 反思评分明确的结论会作为 semantic 记忆写进主库（`topic="reasoning_insight"`）；写入失败时留在链上，`retry_pending_insights()` 可以补写。
+- `find_similar()` 检索相似历史链；`best_decision_for()` 只采信历史准确率足够高的链。
 - 遵守 owner / visibility 隔离；主库加密时推理库也加密。
 
 ---
 
 ## 扩展钩子
 
-`vecrecall.core.hooks`，外部扩展包可以在不修改核心代码的前提下挂载行为。默认不注册任何钩子，行为不变。
+扩展钩子让外部扩展包可以在不修改核心代码的前提下挂载行为（通过 `palace.hooks` 注册）。默认不注册任何钩子，行为不变。
 
 | 调用点 | 触发时机 | 签名 | 典型用途 |
 |---|---|---|---|
@@ -458,15 +447,12 @@ my_plugin = "my_package.plugin:TenantPlugin"
 
 ```python
 from vecrecall.plugins import enable_trace
-trace = enable_trace(palace)            # 写到 <base_dir>/traces/events-YYYY-MM-DD.jsonl
-trace.store.read_events(limit=20)
-trace.store.stats()
+trace = enable_trace(palace)            # 写到数据目录内的 traces/ 目录，按天分文件
 ```
 
-- 记录写入、去重合并、删除、召回四类事件；默认只记元数据，`capture_content=True` 时才记原文，先脱敏再截断。
-- 按天分文件，默认保留 7 天；单文件超过上限后拆分。
+- 记录写入、去重合并、删除、召回四类事件，并提供读取与统计接口；默认只记元数据，`capture_content=True` 时才记原文，先脱敏再截断。
+- 按天分文件；保留期与单文件大小上限可配置。
 - Trace 写入失败只计数，不影响记忆的写入和检索。
-- 已知限制：零结果的检索不留记录；召回事件不含查询原文。
 
 ### 记忆卡片门槛
 
@@ -474,15 +460,15 @@ trace.store.stats()
 
 ```text
 CODE_AGENT_MEMORY
-repo: snowfoxHQ/vecRecall
-scope: vecrecall/core/engine.py::search
+repo: my-team/my-project
+scope: services/auth
 status: verified
-signal: test_core 257/257 通过
-problem: search 默认 min_score=0 丢弃负分结果
-failed_shape: 只改了 _deep_search，漏了 search 的默认值
-validation: python tests/test_core.py
-principle: 检索默认返回 top-n，阈值由调用方显式给出
-anchors: tests/test_core.py::test_search_returns_topn_with_negative_scores
+signal: 登录链路手工验证通过
+problem: 刷新令牌过期后没有跳转登录页
+failed_shape: 只处理了 access token 过期，漏了 refresh token
+validation: 本地复现 + 修复后回归通过
+principle: 令牌过期必须统一走登录刷新流程
+anchors: src/auth/refresh.ts
 ```
 
 ```python
@@ -544,7 +530,7 @@ palace = VecRecall(base_dir="~/.vr", embedding_backend=emb)
 
 工厂取值：`auto`（默认，有 sentence-transformers 则用，否则词法）/ `bow`（零依赖词法）/ `sentence`（本地模型）/ `ollama`（本地 Ollama）/ `api`（OpenAI 兼容远程）。CLI 与 MCP / REST 服务器均可通过 `--embedder` 选择。
 
-默认后端（零依赖）：`SqliteVectorBackend`（SQLite 持久化向量，重启不丢索引）+ `BagOfWordsEmbeddingBackend`（特征哈希语义嵌入，中文单字+二元组+三元组、英文字符 3/4-gram subword，可捕获词形/拼写变体）。默认安装即可获得跨会话持久化和零依赖的语义召回，无需任何外部依赖。
+默认后端（零依赖）：SQLite 持久化向量（重启不丢索引）+ 特征哈希词法嵌入（中文单字+二元组+三元组、英文字符 3/4-gram subword，可捕获词形/拼写变体）。默认安装即可获得跨会话持久化和零依赖的语义召回，无需任何外部依赖。
 
 生产环境推荐：`ChromaVectorBackend` + `SentenceTransformerBackend`（更深层语义）。
 

@@ -108,9 +108,9 @@ vr context "JWT 有效期多长，要不要改" --l3
 **四层上下文**。一次唤醒只加载需要的部分：
 
 ```
-L0  身份      ~50 token    每次都加载
-L1  关键记忆  ~600 token   按重要性取 top-15；immutable 记忆始终包含
-L2  语义触发  按需          与当前话题相似度 ≥ 0.55 才加载
+L0  身份      约 50 token   每次都加载
+L1  关键记忆  约 600 token  按重要性选取；不可变记忆始终包含
+L2  语义触发  按需          与当前话题足够相关才加载
 L3  深度检索  显式请求      默认 rrf 检索
 ```
 
@@ -163,7 +163,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 与 v2.3 相比（10 万条）：`rrf` 检索 4,907 → 45 ms（约 110 倍），`vector` 检索 4,631 → 11 ms（约 420 倍），默认去重写入 4,324 → 16 ms（约 270 倍），新进程首次检索 14 秒以上 → 5.6 秒。
 
 - 向量在首次检索时载入内存，之后增量维护；装了 numpy 时用矩阵计算。`pip install "vecrecall[fast]"` 会装上 numpy；没装时自动退回纯 Python，比 v2.3 快约 2–3 倍，但仍随记忆数线性增长，1 万条以上建议安装。
-- 「新进程首次检索」对应每次运行 `vr` 命令：要载入向量并构建 BM25 索引，其中大部分时间花在 BM25（10 万条约 4.5 秒）。分词结果缓存在 `lexical.db`，只有新增或修改过的记忆才重新分词。MCP / REST 这类常驻服务只在启动后第一次检索时付这个时间。只需要向量检索时可以传 `mode="vector"` 跳过 BM25。
+- 「新进程首次检索」对应每次运行 `vr` 命令：要载入向量并构建词法索引。分词结果有缓存，只有新增或修改过的记忆才重新分词。MCP / REST 这类常驻服务只在启动后第一次检索时付这个时间。只需要向量检索时可以传 `mode="vector"` 跳过词法检索。
 - 进程内存在 1 千条时约 790 MB，主要是 Python 与依赖库本身；10 万条时约 1.9 GB。
 
 数据来自 LongMemEval-S 的真实对话轮次，测试机为普通 Windows 桌面 CPU、Python 3.14。完整报告：[v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md)、[v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md)。复现：`python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`。
@@ -177,7 +177,7 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 | 认知层 | 写入时自动抽取话题、重要性、摘要、实体与关系；启发式零依赖，或接 Ollama / OpenAI 兼容 LLM | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#认知层llm-抽取--语义去重) |
 | 矛盾检测 | 新记忆推翻旧记忆时（「主库从 PostgreSQL 换成 MySQL」），旧记忆标记为被取代，检索时降权，不删除；可接 LLM 判断 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#矛盾检测) |
 | 来源追踪 | 每条记忆记下写入入口（python / mcp / rest / cli）、Agent、会话、轮次和时间；重复写入、取代、蒸馏关系都能查到 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#来源追踪) |
-| 语义去重 | 相似度 ≥ 0.92 时合并到已有记忆，计数加一 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#语义去重合并) |
+| 语义去重 | 与已有记忆高度相似时合并到已有记忆，计数加一 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#语义去重合并) |
 | 时序知识图谱 | 记录实体、关系和属性随时间的变化（「谁在什么时候是什么状态」） | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#时序知识图谱) |
 | 多跳检索 | 向量命中后沿实体关系扩展，返回带路径的证据 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#多跳向量图谱混合检索) |
 | 遗忘曲线与蒸馏 | 记忆强度随时间衰减；碎片记忆可压缩成一条长期记忆 | [指南](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#遗忘曲线--主动蒸馏) |
@@ -209,10 +209,10 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 ## 安全与隐私
 
 - 全部本地运行，核心功能不需要任何 API Key；数据默认在 `~/.vecrecall`。
-- **默认不加密**，原文以明文写入 `knowledge.db`。存放敏感内容时请开启静态加密（`vr init --encrypt`），或写入前脱敏（`redact_payloads=True`）。`python scripts/audit_secrets.py` 可以只读扫描已入库的记忆里有没有混入密钥。
-- 静态加密只覆盖 `knowledge.db`，向量索引、知识图谱、哈希链数据库目前不加密；`vr encryption status` 列出实际存在的不加密文件。
+- **默认不加密**。存放敏感内容时请开启静态加密（`vr init --encrypt`），或开启写入前脱敏（`redact_payloads=True`）；也附带只读审计工具，可扫描已入库记忆中是否混入密钥。
+- 静态加密覆盖记忆主库；实际加密覆盖范围可用 `vr encryption status` 查看。
 - REST：设置 `--api-key` 后必须带 Bearer token；监听非本机地址时强制要求 token；默认不发 CORS 头。
-- MCP 的导入导出路径限制在数据目录内；全部 SQL 参数化。
+- MCP 的导入导出路径限制在数据目录内；数据访问全程使用参数化查询。
 
 ---
 
@@ -220,15 +220,10 @@ python benchmarks/longmemeval.py --data benchmarks/data/longmemeval_s_cleaned.js
 
 ```bash
 pip install -e ".[crypto,dev]"
-python -m pytest                         # 全部测试
-python -m pytest tests/test_core.py -k encryption   # 只跑某个文件里名字含 encryption 的用例
-python tests/test_core.py                # 也可以单独运行，逐项打印检查结果
-python benchmarks/benchmark_recall.py    # 内置冒烟评测，几秒钟
+python -m pytest
 ```
 
-- 每次推送到 `main` 和每个 PR，GitHub Actions 会在 Linux（Python 3.10–3.12）和 Windows（3.12）上跑全部测试，并做打包检查。
-- 发版：推送 `v*` 标签后自动构建并发布到 PyPI（Trusted Publishing），流程见 [RELEASING.md](https://github.com/snowfoxHQ/vecRecall/blob/main/RELEASING.md)。
-- 已知问题与改进计划：[IMPROVEMENT_PLAN.md](https://github.com/snowfoxHQ/vecRecall/blob/main/IMPROVEMENT_PLAN.md)。
+持续集成在多个平台与 Python 版本上运行全部测试并做打包检查；发版由版本标签触发，自动构建并发布到 PyPI。
 
 ---
 

@@ -109,8 +109,8 @@ With Claude Code or any other MCP client:
 
 ```
 L0  identity        ~50 tokens    always loaded
-L1  key memories    ~600 tokens   top-15 by importance; immutable memories always included
-L2  semantic        on demand     loaded when similarity to the current topic ≥ 0.55
+L1  key memories    ~600 tokens   selected by importance; immutable memories always included
+L2  semantic        on demand     loaded when sufficiently relevant to the current topic
 L3  deep search     on request    rrf search by default
 ```
 
@@ -163,7 +163,7 @@ Latency of the default setup (SQLite vector backend + lexical embedding, numpy i
 Compared with v2.3 (100,000 memories): `rrf` search 4,907 → 45 ms (~110×), `vector` search 4,631 → 11 ms (~420×), writes with default dedup 4,324 → 16 ms (~270×), first search in a new process 14+ s → 5.6 s.
 
 - Vectors are loaded into memory on the first search and kept in sync afterwards; with numpy installed, scoring is a single matrix product. `pip install "vecrecall[fast]"` installs numpy. Without it VecRecall falls back to pure Python, about 2–3× faster than v2.3 but still linear in the number of memories; install numpy above ~10,000 memories.
-- "First search in a new process" is what every `vr` CLI call pays: loading vectors and building the BM25 index, mostly the latter (about 4.5 s at 100,000 memories). Tokenization results are cached in `lexical.db`, so only new or changed memories are re-tokenized. Long-running MCP / REST servers pay this once, on their first search. Pass `mode="vector"` to skip BM25.
+- "First search in a new process" is what every `vr` CLI call pays: loading vectors and building the lexical index. Tokenization results are cached, so only new or changed memories are re-tokenized. Long-running MCP / REST servers pay this once, on their first search. Pass `mode="vector"` to skip lexical search.
 - Process memory is about 790 MB at 1,000 memories (mostly Python and its libraries) and about 1.9 GB at 100,000.
 
 Corpus: real conversation turns from LongMemEval-S; machine: an ordinary Windows desktop CPU, Python 3.14. Full reports: [v2.4](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow_v24.md), [v2.3](https://github.com/snowfoxHQ/vecRecall/blob/main/benchmarks/results/scale_bow.md). Reproduce: `python benchmarks/bench_scale.py --data benchmarks/data/longmemeval_s_cleaned.json`.
@@ -179,7 +179,7 @@ The detailed guide is in Chinese: [docs/guide.md](https://github.com/snowfoxHQ/v
 | Cognitive layer | Extracts topic, importance, summary, entities and relations on write; heuristic (zero-dependency) or an Ollama / OpenAI-compatible LLM |
 | Contradiction detection | When a new memory overrides an old one ("switched the primary DB from PostgreSQL to MySQL"), the old one is marked superseded and down-weighted in search, never deleted; an LLM judge can be plugged in | [Guide (zh)](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#矛盾检测) |
 | Provenance | Every memory records its entry point (python / mcp / rest / cli), agent, session, turn and time; duplicate writes, supersession and distillation are traceable | [Guide (zh)](https://github.com/snowfoxHQ/vecRecall/blob/main/docs/guide.md#来源追踪) |
-| Semantic dedup | Merges into an existing memory when similarity ≥ 0.92, incrementing its count |
+| Semantic dedup | Merges into an existing memory when it is highly similar, incrementing its count |
 | Temporal knowledge graph | Tracks entities, relations and how attributes change over time |
 | Multi-hop search | Expands vector hits along entity relations and returns evidence paths |
 | Forgetting curve & distillation | Memory strength decays over time; fragmented memories can be compressed into one long-term memory |
@@ -211,10 +211,10 @@ Full tool, endpoint and command lists: [docs/interfaces.md](https://github.com/s
 ## Security and privacy
 
 - Runs entirely locally; core features need no API key. Data lives in `~/.vecrecall` by default.
-- **Not encrypted by default**: content is written to `knowledge.db` in plaintext. For sensitive content enable at-rest encryption (`vr init --encrypt`) or pre-write redaction (`redact_payloads=True`). `python scripts/audit_secrets.py` scans stored memories read-only for leaked credentials.
-- At-rest encryption covers `knowledge.db` only; the vector index, knowledge graph and hash-chain databases are not encrypted yet.
+- **Not encrypted by default.** For sensitive content enable at-rest encryption (`vr init --encrypt`) or pre-write redaction (`redact_payloads=True`); a read-only audit tool can also scan stored memories for leaked credentials.
+- At-rest encryption covers the main memory store; the actual coverage can be checked with `vr encryption status`.
 - REST: with `--api-key`, a Bearer token is required; binding to a non-loopback address requires a token; no CORS headers by default.
-- MCP import / export paths are confined to the data directory; all SQL is parameterized.
+- MCP import / export paths are confined to the data directory; data access uses parameterized queries throughout.
 
 ---
 
@@ -222,15 +222,10 @@ Full tool, endpoint and command lists: [docs/interfaces.md](https://github.com/s
 
 ```bash
 pip install -e ".[crypto,dev]"
-python -m pytest                         # all tests
-python -m pytest tests/test_core.py -k encryption   # only test functions matching "encryption"
-python tests/test_core.py                # each file still runs standalone, printing every check
-python benchmarks/benchmark_recall.py    # built-in smoke benchmark, a few seconds
+python -m pytest
 ```
 
-- Every push to `main` and every PR runs all tests on Linux (Python 3.10–3.12) and Windows (3.12) in GitHub Actions, plus a packaging check.
-- Releases: pushing a `v*` tag builds and publishes to PyPI automatically (Trusted Publishing); see [RELEASING.md](https://github.com/snowfoxHQ/vecRecall/blob/main/RELEASING.md).
-- Known issues and roadmap: [IMPROVEMENT_PLAN.md](https://github.com/snowfoxHQ/vecRecall/blob/main/IMPROVEMENT_PLAN.md).
+Continuous integration runs the full test suite and a packaging check across several platforms and Python versions. Releases are triggered by a version tag and published to PyPI automatically.
 
 ---
 
